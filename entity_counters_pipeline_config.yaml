@@ -1,0 +1,210 @@
+# ============================================================================
+# Entity States & Counters Pipeline Configuration
+# ============================================================================
+# Purpose: Configure the unified EntityStates.csv and Counters_*.csv ingestion pipeline
+# Author: Shane (Data Engineer)
+# Last Updated: 2025-12-22
+# ============================================================================
+
+# Runtime Configuration
+# ============================================================================
+runtime:
+  runtime_env: mixed_dev_sql_output  # Environment to use for this run
+  
+auth_method: external  # or 'service' depending on infrastructure
+
+
+# Source File Configuration
+# ============================================================================
+entity_counters_source:
+  description: "Network share where weekly EntityStates.csv and daily Counters_*.csv files are stored in WW folders"
+  root_path: "\\\\teais6303\\ES_I-Pro\\Data_Analytics\\Data\\PM_Flex"  # Same as PM_Flex
+  
+  # EntityStates file configuration
+  entity_states:
+    file_name: "EntityStates.csv"
+    expected_columns:
+      - FAB
+      - WW
+      - DAY_SHIFT
+      - ENTITY_STATE
+      - ENTITY
+      - HOURS_IN_STATE
+      - Total_Hours
+      - "% in State"
+    
+  # Counters file configuration  
+  counters:
+    file_prefix: "Counters_"
+    file_extension: ".csv"
+    date_adjustment_days: -1  # Subtract 1 day from file modified date for timestamp
+    # Note: Columns are dynamic based on tool types - no fixed list
+
+
+# Wafer Production Calculation Rules
+# ============================================================================
+wafer_production:
+  # Primary part counter keywords to search for (in order of preference)
+  primary_keywords:
+    - "Focus"  # Searches for any column containing "Focus" (FocusRingCounter, TactrasRLSAFocusRingCounter, etc.)
+  
+  # Fallback keywords if primary has no value or shows negative change
+  fallback_keywords:
+    - "APCCounter"
+    - "ESCCounter"
+    - "PMACounter"
+  
+  # Part replacement detection
+  part_replacement:
+    negative_threshold: -1000  # If counter drops by more than this, it's a replacement
+    log_replacements: true
+    track_last_value: true  # Track the wafer count when part was replaced
+
+
+# Entity State Classification
+# ============================================================================
+entity_states:
+  # Running states (tool actively processing wafers)
+  running_states:
+    - "Running1"
+    - "Running2"
+    - "Running3"
+    - "Running4"
+    - "Running5"
+    - "Running6"
+    - "Running7"
+    - "Running8"
+  
+  # Idle states (ready for production but not running)
+  idle_states:
+    - "UpToProduction"
+  
+  # Down states (any other state = down/unavailable)
+  # Automatically calculated as: NOT (running OR idle)
+  
+  # Bagged status
+  bagged_state: "Bagged"  # Exact match for bagged tools
+
+
+# Entity Name Normalization
+# ============================================================================
+entity_normalization:
+  # Replace PC with PM in entity names
+  replace_pc_with_pm: true
+  pattern: "_PC"
+  replacement: "_PM"
+
+
+# Data Retention Settings
+# ============================================================================
+retention:
+  bronze:
+    entity_states_raw:
+      days: 90  # Keep 90 days of raw EntityStates data
+    counters_raw:
+      days: 90  # Keep 90 days of raw Counters data
+  
+  silver:
+    entity_states_enriched:
+      days: 180  # 6 months
+    counters_enriched:
+      days: 180
+    daily_production:
+      days: 180
+    state_hours_summary:
+      days: 180
+    part_replacements:
+      days: 365  # Keep part replacement history for 1 year
+  
+  gold:
+    fact_daily_production:
+      days: 365
+    fact_state_hours:
+      days: 365
+
+
+# Historical Load Configuration
+# ============================================================================
+historical_load:
+  enabled: true
+  weeks_to_load: 4  # Load last 4 weeks on initial run
+  
+  
+# Incremental Refresh Settings
+# ============================================================================
+incremental_refresh:
+  enabled: true
+  entity_states:
+    date_column: "load_date"  # Column to check for new data
+    lookback_days: 7  # Re-process last 7 days to catch late-arriving data
+  
+  counters:
+    date_column: "counter_date"
+    lookback_days: 7
+
+
+# Logging Configuration
+# ============================================================================
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  
+  # Special logging for wafer production calculation
+  wafer_production_logging:
+    log_no_counter_found: true  # Log when no counter columns have values
+    log_counter_used: true  # Log which counter keyword was used
+    log_negative_changes: true  # Log all negative counter changes
+    log_replacements: true  # Log detected part replacements
+  
+  # State classification logging
+  state_logging:
+    log_unknown_states: true  # Log any states not in running/idle lists
+    log_bagged_tools: true  # Log when tools are marked as bagged
+
+
+# Environment Blocks
+# ============================================================================
+environments:
+  # Development - SQL Server output
+  mixed_dev_sql_output:
+    sqlserver:
+      server: TEHAUSTELSQL1
+      database: Parts_Counter_Production
+      schema: dbo
+      driver: "ODBC Driver 18 for SQL Server"
+      trusted_connection: false
+    
+    snowflake:
+      account: ${SNOWFLAKE_ACCOUNT}
+      database: ES_COPPER_DB
+      schema: ENTITY_COUNTERS_COPPER
+      warehouse: COMPUTE_WH
+
+
+# Table Parameters
+# ============================================================================
+table_parameters:
+  # Bronze layer - EntityStates
+  ENTITY_STATES_SQLSERVER_OUTPUT:
+    target: sqlserver
+    sqlserver:
+      username: ${SQL_USER}
+      password: ${SQL_PASS}
+      driver: "ODBC Driver 18 for SQL Server"
+      server: TEHAUSTELSQL1
+      trusted_connection: false
+      database: Parts_Counter_Production
+      schema: dbo
+      table_name: entity_states_raw
+  
+  # Bronze layer - Counters
+  COUNTERS_SQLSERVER_OUTPUT:
+    target: sqlserver
+    sqlserver:
+      username: ${SQL_USER}
+      password: ${SQL_PASS}
+      driver: "ODBC Driver 18 for SQL Server"
+      server: TEHAUSTELSQL1
+      trusted_connection: false
+      database: Parts_Counter_Production
+      schema: dbo
+      table_name: counters_raw

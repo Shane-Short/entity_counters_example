@@ -1,0 +1,22 @@
+# Entity States & Counters ETL Pipeline - Python Dependencies
+# =============================================================
+
+# Core data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Database connectivity
+pyodbc>=5.0.0
+
+# Configuration
+pyyaml>=6.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Logging (built-in, but listed for reference)
+# logging - standard library
+
+# Optional: For enhanced functionality
+# openpyxl>=3.1.0  # If reading Excel files
+# sqlalchemy>=2.0.0  # Alternative database engine
