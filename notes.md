@@ -1,1049 +1,799 @@
 """
-Dynamic Counters Table Setup
-=============================
-Reads a sample Counters_*.csv file and generates CREATE TABLE SQL script
-with ALL actual columns from the CSV file.
-
-This ensures we capture EVERY part counter column, not just sample columns.
-
-Usage:
-    python -m etl.setup_counters_table
-    
-This will:
-1. Find a sample Counters CSV file
-2. Read all column names
-3. Generate create_counters_raw_GENERATED.sql with full schema
-4. You then execute that generated SQL file
+Helper Functions for Entity States & Counters Pipeline
+======================================================
+Contains reusable functions for:
+- Work week calculation (Intel fiscal calendar)
+- File discovery (EntityStates and latest Counters)
+- Entity name normalization (PC -> PM conversion)
+- FAB_ENTITY key creation
+- DataFrame utilities
 """
 
-import pandas as pd
-import yaml
-import logging
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from datetime import datetime
-
-from utils.helpers import get_recent_work_weeks, find_latest_counters_file
-from utils.logger import setup_logger
-
-logger = setup_logger(__name__, level='INFO')
-
-
-class CountersTableSetup:
-    """
-    Generates CREATE TABLE SQL for counters_raw based on actual CSV columns.
-    """
-    
-    def __init__(self, config_path: str = 'config/config.yaml'):
-        """
-        Initialize setup.
-        
-        Parameters
-        ----------
-        config_path : str
-            Path to configuration file
-        """
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-        
-        self.source_config = self.config['entity_counters_source']
-        logger.info("Counters Table Setup initialized")
-    
-    def find_sample_counters_file(self):
-        """
-        Find a sample Counters CSV file to read column names from.
-        
-        Returns
-        -------
-        Path
-            Path to sample Counters file
-        """
-        logger.info("Searching for sample Counters file...")
-        
-        root_path = self.source_config['root_path']
-        file_prefix = self.source_config['counters']['file_prefix']
-        
-        # Try last 4 weeks
-        work_weeks = get_recent_work_weeks(4)
-        
-        for ww_str in work_weeks:
-            result = find_latest_counters_file(root_path, ww_str, file_prefix)
-            if result:
-                file_path, modified_dt = result
-                logger.info(f"Found sample file: {file_path}")
-                return file_path
-        
-        raise FileNotFoundError("No Counters CSV file found in last 4 weeks")
-    
-    def read_column_names(self, file_path: Path):
-        """
-        Read column names from Counters CSV.
-        
-        Parameters
-        ----------
-        file_path : Path
-            Path to Counters CSV
-        
-        Returns
-        -------
-        list
-            List of column names
-        """
-        logger.info(f"Reading columns from: {file_path}")
-        
-        # Read just the first row to get columns
-        df = pd.read_csv(file_path, nrows=1)
-        columns = df.columns.tolist()
-        
-        logger.info(f"Found {len(columns)} columns in CSV")
-        logger.info(f"Sample columns: {columns[:10]}")
-        
-        return columns
-    
-    def generate_sql_script(self, csv_columns: list, output_path: str = 'sql/ddl/create_counters_raw_GENERATED.sql'):
-        """
-        Generate CREATE TABLE SQL script with all columns.
-        
-        Parameters
-        ----------
-        csv_columns : list
-            List of column names from CSV
-        output_path : str
-            Where to save generated SQL
-        """
-        logger.info("Generating CREATE TABLE SQL script...")
-        
-        # Required system columns
-        system_columns = ['ENTITY', 'FAB']
-        
-        # Part counter columns (everything else from CSV)
-        part_counter_columns = [col for col in csv_columns if col not in system_columns]
-        
-        # Verify required columns exist
-        if 'ENTITY' not in csv_columns:
-            raise ValueError("ENTITY column not found in Counters CSV!")
-        
-        # FAB might not be in CSV - we'll add it
-        has_fab = 'FAB' in csv_columns
-        if not has_fab:
-            logger.warning("FAB column not in CSV - will derive from ENTITY")
-        
-        # Build SQL script
-        sql_lines = []
-        sql_lines.append("-- " + "=" * 76)
-        sql_lines.append("-- AUTO-GENERATED counters_raw Table Definition")
-        sql_lines.append("-- " + "=" * 76)
-        sql_lines.append(f"-- Generated: {datetime.now()}")
-        sql_lines.append(f"-- Source CSV columns: {len(csv_columns)}")
-        sql_lines.append(f"-- Part counter columns: {len(part_counter_columns)}")
-        sql_lines.append("-- " + "=" * 76)
-        sql_lines.append("")
-        sql_lines.append("USE Parts_Counter_Production;")
-        sql_lines.append("GO")
-        sql_lines.append("")
-        sql_lines.append("DROP TABLE IF EXISTS dbo.counters_raw;")
-        sql_lines.append("GO")
-        sql_lines.append("")
-        sql_lines.append("CREATE TABLE dbo.counters_raw (")
-        sql_lines.append("    -- Primary Key")
-        sql_lines.append("    counters_raw_id INT IDENTITY(1,1) PRIMARY KEY,")
-        sql_lines.append("    ")
-        sql_lines.append("    -- System Columns")
-        sql_lines.append("    ENTITY VARCHAR(255) NOT NULL,")
-        
-        if has_fab:
-            sql_lines.append("    FAB VARCHAR(50) NOT NULL,")
-        else:
-            sql_lines.append("    FAB VARCHAR(50) NOT NULL,  -- Derived from ENTITY in pipeline")
-        
-        sql_lines.append("    FAB_ENTITY VARCHAR(300) NOT NULL,")
-        sql_lines.append("    ")
-        sql_lines.append(f"    -- Part Counter Columns ({len(part_counter_columns)} columns from CSV)")
-        
-        # Add each part counter column
-        for i, col in enumerate(part_counter_columns):
-            # Clean column name (escape brackets if needed)
-            clean_col = col.replace('[', '').replace(']', '')
-            
-            # Determine if this is last counter column
-            is_last_counter = (i == len(part_counter_columns) - 1)
-            
-            if is_last_counter:
-                sql_lines.append(f"    [{clean_col}] DECIMAL(18,2),")
-            else:
-                sql_lines.append(f"    [{clean_col}] DECIMAL(18,2),")
-        
-        sql_lines.append("    ")
-        sql_lines.append("    -- Metadata Columns")
-        sql_lines.append("    source_file VARCHAR(500),")
-        sql_lines.append("    load_ww VARCHAR(20),")
-        sql_lines.append("    load_ts DATETIME2(7),")
-        sql_lines.append("    counter_date DATE NOT NULL,")
-        sql_lines.append("    file_modified_ts DATETIME2(7),")
-        sql_lines.append("    ")
-        sql_lines.append("    -- Indexes")
-        sql_lines.append("    INDEX IX_counters_raw_FAB_ENTITY (FAB_ENTITY),")
-        sql_lines.append("    INDEX IX_counters_raw_ENTITY (ENTITY),")
-        sql_lines.append("    INDEX IX_counters_raw_counter_date (counter_date),")
-        sql_lines.append("    INDEX IX_counters_raw_FAB_ENTITY_date (FAB_ENTITY, counter_date)")
-        sql_lines.append(");")
-        sql_lines.append("GO")
-        sql_lines.append("")
-        sql_lines.append("PRINT 'counters_raw table created successfully';")
-        sql_lines.append(f"PRINT 'Total columns: {len(csv_columns) + 5}';  -- CSV columns + metadata")
-        sql_lines.append(f"PRINT 'Part counter columns: {len(part_counter_columns)}';")
-        sql_lines.append("GO")
-        
-        # Write to file
-        output_file = Path(output_path)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(output_file, 'w') as f:
-            f.write('\n'.join(sql_lines))
-        
-        logger.info(f"Generated SQL script: {output_file}")
-        logger.info(f"Total columns in table: {len(csv_columns) + 5}")
-        logger.info(f"Part counter columns: {len(part_counter_columns)}")
-        
-        return output_file
-    
-    def run(self):
-        """
-        Main execution: Find sample file, read columns, generate SQL.
-        """
-        logger.info("=" * 80)
-        logger.info("COUNTERS TABLE DYNAMIC SETUP")
-        logger.info("=" * 80)
-        
-        # Find sample file
-        sample_file = self.find_sample_counters_file()
-        
-        # Read columns
-        csv_columns = self.read_column_names(sample_file)
-        
-        # Generate SQL
-        output_file = self.generate_sql_script(csv_columns)
-        
-        logger.info("")
-        logger.info("=" * 80)
-        logger.info("SETUP COMPLETE")
-        logger.info("=" * 80)
-        logger.info("")
-        logger.info("NEXT STEPS:")
-        logger.info(f"1. Open SQL Server Management Studio")
-        logger.info(f"2. Execute: {output_file}")
-        logger.info(f"3. This will create counters_raw table with ALL {len(csv_columns)} columns")
-        logger.info(f"4. Then run the ETL pipeline normally")
-        logger.info("=" * 80)
-
-
-if __name__ == "__main__":
-    setup = CountersTableSetup()
-    setup.run()
-
-
-
-
-
-
-
-
-
-
-    """
-Bronze Layer - Counters File Ingestion
-=======================================
-Loads Counters_*.csv files from work week folders into raw bronze table.
-
-Features:
-- Finds latest Counters file by modified date
-- Adjusts timestamp (subtracts 1 day)
-- Loads last 4 weeks of historical data
-- Applies entity normalization (PC -> PM)
-- Creates FAB_ENTITY key
-- Handles dynamic part counter columns
-- Full and incremental refresh modes
-"""
-
-import pandas as pd
 import logging
-from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
-import yaml
-
-# Import helper functions
-from utils.helpers import (
-    get_recent_work_weeks,
-    find_latest_counters_file,
-    normalize_entity_name,
-    apply_entity_normalization,
-    create_fab_entity_key,
-    load_csv_safe,
-    add_metadata_columns,
-    adjust_timestamp
-)
-from utils.logger import setup_logger
+import pandas as pd
+import numpy as np
+from typing import Tuple, Dict, List, Optional
+import os
 
 logger = logging.getLogger(__name__)
 
 
-class CountersIngestion:
+# ============================================================================
+# Work Week Calculation
+# ============================================================================
+
+def get_intel_ww(dt: Optional[datetime] = None) -> str:
     """
-    Handles ingestion of Counters_*.csv files into Bronze layer.
+    Calculate Intel work week string (fiscal calendar).
+    
+    Intel's fiscal year starts on the Sunday closest to December 28.
+    Work weeks run Sunday-Saturday.
+    
+    Parameters
+    ----------
+    dt : datetime, optional
+        Date to calculate work week for. If None, uses current UTC time.
+    
+    Returns
+    -------
+    str
+        Work week string in format 'YYYYWWNN' (e.g., '2025WW51')
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    
+    # Strip timezone to avoid naive/aware datetime arithmetic issues
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    
+    # Get ISO calendar info
+    iso_year, iso_week, iso_weekday = dt.isocalendar()
+    
+    # Intel fiscal year logic
+    # Find the Sunday closest to December 28 of the previous calendar year
+    dec_28 = datetime(iso_year - 1, 12, 28)
+    days_since_sunday = (dec_28.weekday() + 1) % 7
+    fiscal_year_start = dec_28 - timedelta(days=days_since_sunday)
+    
+    # Calculate days since fiscal year start
+    days_since_start = (dt - fiscal_year_start).days
+    
+    # Calculate work week number (1-based)
+    fiscal_week = (days_since_start // 7) + 1
+    
+    # Determine fiscal year
+    if dt < fiscal_year_start:
+        fiscal_year = iso_year - 1
+        # Recalculate for previous fiscal year
+        dec_28_prev = datetime(fiscal_year - 1, 12, 28)
+        days_since_sunday_prev = (dec_28_prev.weekday() + 1) % 7
+        fiscal_year_start_prev = dec_28_prev - timedelta(days=days_since_sunday_prev)
+        days_since_start_prev = (dt - fiscal_year_start_prev).days
+        fiscal_week = (days_since_start_prev // 7) + 1
+    else:
+        fiscal_year = iso_year
+    
+    ww_str = f"{fiscal_year}WW{fiscal_week:02d}"
+    logger.debug(f"Calculated Intel work week: {ww_str} for date {dt.date()}")
+    return ww_str
+
+
+def get_recent_work_weeks(num_weeks: int = 4) -> List[str]:
+    """
+    Get list of recent work week strings.
+    
+    Parameters
+    ----------
+    num_weeks : int
+        Number of recent weeks to return (including current week)
+    
+    Returns
+    -------
+    List[str]
+        List of work week strings, most recent first
+    """
+    current_date = datetime.now(timezone.utc)
+    work_weeks = []
+    
+    for i in range(num_weeks):
+        week_date = current_date - timedelta(weeks=i)
+        ww_str = get_intel_ww(week_date)
+        if ww_str not in work_weeks:  # Avoid duplicates
+            work_weeks.append(ww_str)
+    
+    logger.info(f"Generated {len(work_weeks)} recent work weeks: {work_weeks}")
+    return work_weeks
+
+
+# ============================================================================
+# File Discovery
+# ============================================================================
+
+def find_entity_states_file(root_path: str, ww_str: str, file_name: str = "EntityStates.csv") -> Optional[Path]:
+    """
+    Find EntityStates.csv file in work week folder.
+    
+    Parameters
+    ----------
+    root_path : str
+        Root path to WW folders
+    ww_str : str
+        Work week string (e.g., '2025WW51')
+    file_name : str
+        Expected file name
+    
+    Returns
+    -------
+    Path or None
+        Path to file if found, None otherwise
+    """
+    root_dir = Path(root_path)
+    ww_folder = root_dir / ww_str
+    file_path = ww_folder / file_name
+    
+    if file_path.exists():
+        logger.info(f"Found EntityStates file: {file_path}")
+        return file_path
+    else:
+        logger.warning(f"EntityStates file not found: {file_path}")
+        return None
+
+
+def find_latest_counters_file(root_path: str, ww_str: str, file_prefix: str = "Counters_") -> Optional[Tuple[Path, datetime]]:
+    """
+    Find the most recent Counters_*.csv file in work week folder based on file modified date.
+    
+    Parameters
+    ----------
+    root_path : str
+        Root path to WW folders
+    ww_str : str
+        Work week string (e.g., '2025WW51')
+    file_prefix : str
+        File prefix to search for
+    
+    Returns
+    -------
+    Tuple[Path, datetime] or None
+        (file_path, modified_datetime) if found, None otherwise
+    """
+    root_dir = Path(root_path)
+    ww_folder = root_dir / ww_str
+    
+    if not ww_folder.exists():
+        logger.warning(f"Work week folder not found: {ww_folder}")
+        return None
+    
+    # Find all files matching prefix
+    counter_files = list(ww_folder.glob(f"{file_prefix}*.csv"))
+    
+    if not counter_files:
+        logger.warning(f"No Counters files found in {ww_folder} with prefix '{file_prefix}'")
+        return None
+    
+    # Get file modified times
+    file_times = []
+    for file_path in counter_files:
+        try:
+            modified_time = os.path.getmtime(file_path)
+            modified_dt = datetime.fromtimestamp(modified_time, tz=timezone.utc)
+            file_times.append((file_path, modified_dt))
+        except Exception as e:
+            logger.error(f"Error getting modified time for {file_path}: {e}")
+            continue
+    
+    if not file_times:
+        logger.warning(f"Could not get modified times for any Counters files in {ww_folder}")
+        return None
+    
+    # Sort by modified time (most recent first)
+    file_times.sort(key=lambda x: x[1], reverse=True)
+    
+    most_recent_file, most_recent_time = file_times[0]
+    
+    logger.info(f"Found {len(file_times)} Counters files in {ww_folder}")
+    logger.info(f"Selected most recent: {most_recent_file.name} (modified: {most_recent_time})")
+    
+    return most_recent_file, most_recent_time
+
+
+# ============================================================================
+# Entity Name Normalization
+# ============================================================================
+
+def normalize_entity_name(entity: str, pattern: str = "_PC", replacement: str = "_PM") -> str:
+    """
+    Normalize entity names by replacing PC with PM.
+    
+    Parameters
+    ----------
+    entity : str
+        Original entity name
+    pattern : str
+        Pattern to replace (default: '_PC')
+    replacement : str
+        Replacement string (default: '_PM')
+    
+    Returns
+    -------
+    str
+        Normalized entity name
+    """
+    if pd.isna(entity):
+        return entity
+    
+    normalized = str(entity).replace(pattern, replacement)
+    
+    if normalized != entity:
+        logger.debug(f"Normalized entity: {entity} -> {normalized}")
+    
+    return normalized
+
+
+def apply_entity_normalization(df: pd.DataFrame, config: Dict, entity_column: str = 'ENTITY') -> pd.DataFrame:
+    """
+    Apply entity normalization to a DataFrame.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with entity column
+    config : dict
+        Configuration dictionary
+    entity_column : str
+        Name of the entity column
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with normalized entity names
+    """
+    if config['entity_normalization']['replace_pc_with_pm']:
+        pattern = config['entity_normalization']['pattern']
+        replacement = config['entity_normalization']['replacement']
+        
+        original_count = len(df)
+        entities_changed = df[entity_column] != df[entity_column].str.replace(pattern, replacement)
+        changed_count = entities_changed.sum()
+        
+        df[entity_column] = df[entity_column].apply(
+            lambda x: normalize_entity_name(x, pattern, replacement)
+        )
+        
+        logger.info(f"Entity normalization: {changed_count} of {original_count} entities changed ({pattern} -> {replacement})")
+    
+    return df
+
+
+# ============================================================================
+# FAB_ENTITY Key Creation
+# ============================================================================
+
+def create_fab_entity_key(df: pd.DataFrame, fab_column: str = 'FAB', entity_column: str = 'ENTITY') -> pd.DataFrame:
+    """
+    Create FAB_ENTITY composite key column.
+    
+    Combines FAB and ENTITY with underscore separator.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with FAB and ENTITY columns
+    fab_column : str
+        Name of FAB column
+    entity_column : str
+        Name of ENTITY column
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with new FAB_ENTITY column
+    """
+    df['FAB_ENTITY'] = df[fab_column].astype(str) + '_' + df[entity_column].astype(str)
+    
+    logger.info(f"Created FAB_ENTITY key from {fab_column} and {entity_column}")
+    logger.debug(f"Sample FAB_ENTITY values: {df['FAB_ENTITY'].head(3).tolist()}")
+    
+    return df
+
+
+# ============================================================================
+# DataFrame Utilities
+# ============================================================================
+
+def load_csv_safe(file_path: Path, expected_columns: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Safely load CSV file with error handling and column validation.
+    
+    Parameters
+    ----------
+    file_path : Path
+        Path to CSV file
+    expected_columns : List[str], optional
+        List of expected column names
+    
+    Returns
+    -------
+    pd.DataFrame
+        Loaded DataFrame
+    """
+    logger.info(f"Loading CSV: {file_path}")
+    
+    try:
+        df = pd.read_csv(file_path, encoding='utf-8')
+    except UnicodeDecodeError:
+        logger.warning(f"UTF-8 decode failed, trying latin-1 encoding")
+        df = pd.read_csv(file_path, encoding='latin-1')
+    
+    logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns")
+    
+    # Validate expected columns
+    if expected_columns:
+        missing_cols = set(expected_columns) - set(df.columns)
+        extra_cols = set(df.columns) - set(expected_columns)
+        
+        if missing_cols:
+            logger.warning(f"Missing expected columns: {missing_cols}")
+        
+        if extra_cols:
+            logger.info(f"Extra columns found (dynamic part counters): {len(extra_cols)} columns")
+    
+    return df
+
+
+def add_metadata_columns(df: pd.DataFrame, source_file: str, load_ww: str, load_ts: Optional[datetime] = None) -> pd.DataFrame:
+    """
+    Add standard metadata columns to DataFrame.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Source DataFrame
+    source_file : str
+        Name of source file
+    load_ww : str
+        Work week string
+    load_ts : datetime, optional
+        Load timestamp (defaults to current UTC time)
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with metadata columns added
+    """
+    if load_ts is None:
+        load_ts = datetime.now(timezone.utc)
+    
+    df['source_file'] = source_file
+    df['load_ww'] = load_ww
+    df['load_ts'] = load_ts.isoformat()
+    
+    logger.debug(f"Added metadata columns: source_file={source_file}, load_ww={load_ww}, load_ts={load_ts}")
+    
+    return df
+
+
+def adjust_timestamp(dt: datetime, days: int) -> datetime:
+    """
+    Adjust timestamp by specified number of days.
+    
+    Parameters
+    ----------
+    dt : datetime
+        Original timestamp
+    days : int
+        Number of days to add (negative to subtract)
+    
+    Returns
+    -------
+    datetime
+        Adjusted timestamp
+    """
+    adjusted = dt + timedelta(days=days)
+    logger.debug(f"Adjusted timestamp: {dt} -> {adjusted} ({days:+d} days)")
+    return adjusted
+
+
+
+
+
+
+
+
+
+
+
+
+
+    """
+Silver Layer - Wafer Production Calculation
+============================================
+Calculates daily wafer production using part counter changes.
+
+Features:
+- Counter keyword search (Focus -> APCCounter -> ESCCounter -> PMACounter)
+- Part replacement detection (negative threshold: -1000)
+- Fallback logic when primary counter fails
+- Wafers per running hour calculation
+- Comprehensive logging of all decisions
+- Duplicate prevention
+"""
+
+import pandas as pd
+import numpy as np
+import logging
+import re
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+
+from utils.logger import WaferProductionLogger
+
+logger = logging.getLogger(__name__)
+
+
+class WaferProductionCalculator:
+    """
+    Calculates wafer production metrics from part counter data.
     """
     
     def __init__(self, config: Dict):
         """
-        Initialize Counters ingestion.
+        Initialize wafer production calculator.
         
         Parameters
         ----------
         config : dict
-            Configuration dictionary from config.yaml
+            Configuration dictionary
         """
         self.config = config
-        self.source_config = config['entity_counters_source']
-        self.counters_config = self.source_config['counters']
-        self.historical_config = config['historical_load']
+        self.wafer_config = config['wafer_production']
+        self.primary_keywords = self.wafer_config['primary_keywords']
+        self.fallback_keywords = self.wafer_config['fallback_keywords']
+        self.replacement_threshold = self.wafer_config['part_replacement']['negative_threshold']
+        self.exclude_patterns = self.wafer_config.get('exclude_patterns', [])
         
-        self.logger = logger
-        self.logger.info("Counters Ingestion initialized")
+        # Initialize specialized logger
+        self.prod_logger = WaferProductionLogger(logger, config['logging'])
+        
+        logger.info("Wafer Production Calculator initialized")
+        logger.info(f"Primary keywords: {self.primary_keywords}")
+        logger.info(f"Fallback keywords: {self.fallback_keywords}")
+        logger.info(f"Replacement threshold: {self.replacement_threshold}")
+        logger.info(f"Exclude patterns: {self.exclude_patterns}")
     
-    def discover_files(self, mode: str = 'full') -> List[Tuple[str, Path, datetime]]:
+    def is_entity_excluded(self, entity: str) -> bool:
         """
-        Discover Counters files to process.
+        Check if entity should be excluded from wafer production calculation.
         
         Parameters
         ----------
-        mode : str
-            'full' = load last N weeks, 'incremental' = load current week only
+        entity : str
+            Entity name to check
         
         Returns
         -------
-        List[Tuple[str, Path, datetime]]
-            List of (ww_string, file_path, modified_datetime) tuples
+        bool
+            True if entity should be excluded, False otherwise
         """
-        root_path = self.source_config['root_path']
-        file_prefix = self.counters_config['file_prefix']
+        for pattern in self.exclude_patterns:
+            if re.search(pattern, entity):
+                return True
+        return False
+    
+    def find_counter_column(self, row: pd.Series, keywords: List[str]) -> Optional[Tuple[str, float, str]]:
+        """
+        Find first counter column that matches keywords and has a value.
         
-        if mode == 'full' and self.historical_config['enabled']:
-            # Load last N weeks
-            num_weeks = self.historical_config['weeks_to_load']
-            work_weeks = get_recent_work_weeks(num_weeks)
-            self.logger.info(f"Full refresh mode: Loading {num_weeks} weeks of data")
-        else:
-            # Load current week only
-            work_weeks = get_recent_work_weeks(1)
-            self.logger.info(f"Incremental mode: Loading current week only")
+        Parameters
+        ----------
+        row : pd.Series
+            DataFrame row
+        keywords : List[str]
+            List of keywords to search for
         
-        # Find latest Counters file for each work week
-        files_to_process = []
-        for ww_str in work_weeks:
-            result = find_latest_counters_file(root_path, ww_str, file_prefix)
-            if result:
-                file_path, modified_dt = result
-                files_to_process.append((ww_str, file_path, modified_dt))
+        Returns
+        -------
+        Tuple[str, float, str] or None
+            (column_name, value, keyword_used) if found, None otherwise
+        """
+        for keyword in keywords:
+            # Find columns containing this keyword
+            matching_cols = [col for col in row.index if keyword in col and col.endswith('Counter')]
+            
+            # Check each matching column for a non-null value
+            for col in matching_cols:
+                value = row[col]
+                if pd.notna(value) and value > 0:
+                    return (col, value, keyword)
+        
+        return None
+    
+    def calculate_counter_change(self, 
+                                current_row: pd.Series, 
+                                previous_row: Optional[pd.Series],
+                                counter_col: str) -> Optional[float]:
+        """
+        Calculate change in counter value from previous day.
+        
+        Parameters
+        ----------
+        current_row : pd.Series
+            Current day row
+        previous_row : pd.Series or None
+            Previous day row
+        counter_col : str
+            Counter column name
+        
+        Returns
+        -------
+        float or None
+            Counter change, or None if cannot calculate
+        """
+        if previous_row is None:
+            return None
+        
+        current_val = current_row[counter_col]
+        previous_val = previous_row.get(counter_col, np.nan)
+        
+        if pd.isna(current_val) or pd.isna(previous_val):
+            return None
+        
+        change = current_val - previous_val
+        return change
+    
+    def detect_part_replacement(self, change: float, entity: str, date: str, 
+                               counter: str, current_val: float, 
+                               previous_val: float) -> bool:
+        """
+        Detect if change indicates a part replacement.
+        
+        Parameters
+        ----------
+        change : float
+            Counter change value
+        entity : str
+            Entity name
+        date : str
+            Date
+        counter : str
+            Counter column name
+        current_val : float
+            Current counter value
+        previous_val : float
+            Previous counter value
+        
+        Returns
+        -------
+        bool
+            True if replacement detected
+        """
+        if change < self.replacement_threshold:
+            self.prod_logger.log_part_replacement(
+                entity, date, counter, previous_val, current_val, self.replacement_threshold
+            )
+            return True
+        return False
+    
+    def calculate_wafer_production_single_row(self, 
+                                             current_row: pd.Series,
+                                             previous_row: Optional[pd.Series],
+                                             running_hours: float) -> Dict:
+        """
+        Calculate wafer production for a single entity-date row.
+        
+        Parameters
+        ----------
+        current_row : pd.Series
+            Current day row with counter data
+        previous_row : pd.Series or None
+            Previous day row
+        running_hours : float
+            Running state hours for this day
+        
+        Returns
+        -------
+        Dict
+            Dictionary with production metrics
+        """
+        entity = current_row['ENTITY']
+        date = str(current_row['counter_date'])
+        
+        result = {
+            'ENTITY': entity,
+            'counter_date': current_row['counter_date'],
+            'counter_column_used': None,
+            'counter_keyword_used': None,
+            'counter_current_value': None,
+            'counter_previous_value': None,
+            'counter_change': None,
+            'part_replacement_detected': False,
+            'wafers_produced': None,
+            'running_hours': running_hours,
+            'wafers_per_hour': None,
+            'calculation_notes': []
+        }
+        
+        # Try primary keywords first
+        all_keywords = self.primary_keywords + self.fallback_keywords
+        counter_found = self.find_counter_column(current_row, all_keywords)
+        
+        if not counter_found:
+            self.prod_logger.log_no_counter_found(entity, date, all_keywords)
+            result['calculation_notes'].append('No counter found with any keyword')
+            return result
+        
+        counter_col, current_val, keyword = counter_found
+        result['counter_column_used'] = counter_col
+        result['counter_keyword_used'] = keyword
+        result['counter_current_value'] = current_val
+        
+        self.prod_logger.log_counter_found(entity, date, counter_col, current_val, keyword)
+        
+        # Calculate change from previous day
+        if previous_row is None:
+            result['calculation_notes'].append('First day - no previous value')
+            return result
+        
+        # Get previous value for same counter
+        if counter_col not in previous_row.index:
+            result['calculation_notes'].append(f'Counter {counter_col} not in previous row')
+            return result
+        
+        previous_val = previous_row[counter_col]
+        if pd.isna(previous_val):
+            result['calculation_notes'].append('Previous value is null')
+            return result
+        
+        result['counter_previous_value'] = previous_val
+        change = current_val - previous_val
+        result['counter_change'] = change
+        
+        # Check for negative change (part replacement)
+        if change < 0:
+            self.prod_logger.log_negative_change(entity, date, counter_col, previous_val, current_val, change)
+            
+            # Check if it's a part replacement
+            if self.detect_part_replacement(change, entity, date, counter_col, current_val, previous_val):
+                result['part_replacement_detected'] = True
+                result['calculation_notes'].append(f'Part replacement: {counter_col} reset from {previous_val} to {current_val}')
+                
+                # Try fallback counter
+                if keyword in self.primary_keywords:
+                    fallback_found = self.find_counter_column(current_row, self.fallback_keywords)
+                    if fallback_found:
+                        fallback_col, fallback_val, fallback_keyword = fallback_found
+                        self.prod_logger.log_fallback_used(entity, date, keyword, fallback_keyword, 'part replacement')
+                        
+                        # Recalculate with fallback
+                        if fallback_col in previous_row.index:
+                            prev_fallback = previous_row[fallback_col]
+                            if pd.notna(prev_fallback):
+                                change = fallback_val - prev_fallback
+                                if change >= 0:
+                                    result['counter_column_used'] = fallback_col
+                                    result['counter_keyword_used'] = fallback_keyword
+                                    result['counter_current_value'] = fallback_val
+                                    result['counter_previous_value'] = prev_fallback
+                                    result['counter_change'] = change
+                                    result['calculation_notes'].append(f'Used fallback counter: {fallback_col}')
+                
+                # If still negative, set to zero
+                if result['counter_change'] < 0:
+                    result['counter_change'] = 0
+                    result['calculation_notes'].append('Counter change set to 0 (part replacement)')
+        
+        # Calculate wafers produced and wafers per hour
+        if result['counter_change'] is not None and result['counter_change'] >= 0:
+            result['wafers_produced'] = result['counter_change']
+            
+            if running_hours > 0:
+                result['wafers_per_hour'] = result['wafers_produced'] / running_hours
+                self.prod_logger.log_wafer_calculation(
+                    entity, date, result['counter_change'], running_hours, result['wafers_per_hour']
+                )
             else:
-                self.logger.warning(f"No Counters file found for {ww_str}")
+                result['calculation_notes'].append('No running hours - cannot calculate wafers/hour')
         
-        self.logger.info(f"Discovered {len(files_to_process)} Counters files to process")
-        return files_to_process
+        return result
     
-    def load_single_file(self, ww_str: str, file_path: Path, modified_dt: datetime) -> pd.DataFrame:
+    def calculate_for_dataframe(self, counters_df: pd.DataFrame, state_hours_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Load a single Counters file.
+        Calculate wafer production for entire DataFrame.
         
         Parameters
         ----------
-        ww_str : str
-            Work week string
-        file_path : Path
-            Path to CSV file
-        modified_dt : datetime
-            File modified timestamp
+        counters_df : pd.DataFrame
+            Counters data (from Bronze)
+        state_hours_df : pd.DataFrame
+            State hours data (running hours by entity-date)
         
         Returns
         -------
         pd.DataFrame
-            Loaded and processed DataFrame
+            Daily production metrics
         """
-        self.logger.info(f"Loading Counters file for {ww_str}: {file_path.name}")
-        self.logger.info(f"File modified: {modified_dt}")
+        logger.info("Starting wafer production calculation")
         
-        # Load CSV
-        df = load_csv_safe(file_path, expected_columns=None)  # No expected columns (dynamic)
+        # Filter out excluded entities (e.g., loadports)
+        if self.exclude_patterns:
+            initial_count = len(counters_df)
+            excluded_entities = counters_df['ENTITY'].apply(self.is_entity_excluded)
+            excluded_count = excluded_entities.sum()
+            
+            if excluded_count > 0:
+                excluded_list = counters_df[excluded_entities]['ENTITY'].unique().tolist()
+                logger.info(f"Excluding {excluded_count} rows from {len(excluded_list)} entities matching exclude patterns")
+                logger.info(f"Sample excluded entities: {excluded_list[:5]}")
+                counters_df = counters_df[~excluded_entities].reset_index(drop=True)
+                logger.info(f"Remaining entities for wafer production: {len(counters_df)}")
         
-        # Validate ENTITY column exists
-        if 'ENTITY' not in df.columns:
-            raise ValueError(f"ENTITY column not found in {file_path}")
+        # Sort by entity and date
+        counters_df = counters_df.sort_values(['ENTITY', 'counter_date']).reset_index(drop=True)
         
-        self.logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns from {file_path.name}")
+        results = []
         
-        # Apply entity normalization (PC -> PM)
-        df = apply_entity_normalization(df, self.config, entity_column='ENTITY')
+        # Group by entity
+        for entity, entity_group in counters_df.groupby('ENTITY'):
+            entity_group = entity_group.sort_values('counter_date').reset_index(drop=True)
+            
+            # Process each day
+            for idx, current_row in entity_group.iterrows():
+                # Get previous row
+                previous_row = entity_group.iloc[idx - 1] if idx > 0 else None
+                
+                # Get running hours for this day
+                date = current_row['counter_date']
+                running_hours_row = state_hours_df[
+                    (state_hours_df['ENTITY'] == entity) & 
+                    (state_hours_df['state_date'] == date)
+                ]
+                
+                running_hours = running_hours_row['running_hours'].values[0] if len(running_hours_row) > 0 else 0
+                
+                # Calculate production
+                result = self.calculate_wafer_production_single_row(current_row, previous_row, running_hours)
+                results.append(result)
         
-        # Handle FAB column
-        if 'FAB' not in df.columns:
-            # FAB not in CSV - derive from ENTITY
-            # Typical ENTITY format: "FAB_TOOL_PM" or "FACILITYNAME_TOOL_PM"
-            # Extract first part before underscore as FAB
-            self.logger.warning("FAB column not found in Counters file - deriving from ENTITY")
-            df['FAB'] = df['ENTITY'].str.split('_').str[0]
-            self.logger.info(f"Derived FAB from ENTITY - Sample FAB values: {df['FAB'].unique()[:5].tolist()}")
-        else:
-            self.logger.info("FAB column found in CSV - using as-is")
+        # Convert to DataFrame
+        production_df = pd.DataFrame(results)
         
-        # Create FAB_ENTITY key
-        df = create_fab_entity_key(df, fab_column='FAB', entity_column='ENTITY')
+        # Convert notes list to string
+        production_df['calculation_notes'] = production_df['calculation_notes'].apply(lambda x: '; '.join(x) if x else None)
         
-        # Calculate adjusted timestamp (subtract N days from file modified date)
-        date_adjustment = self.counters_config.get('date_adjustment_days', -1)
-        adjusted_ts = adjust_timestamp(modified_dt, days=date_adjustment)
-        
-        # Add metadata columns
-        df = add_metadata_columns(
-            df,
-            source_file=file_path.name,
-            load_ww=ww_str,
-            load_ts=datetime.now(timezone.utc)
-        )
-        
-        # Add counter_date column (adjusted timestamp date)
-        df['counter_date'] = adjusted_ts.date()
-        df['file_modified_ts'] = modified_dt.isoformat()
-        
-        self.logger.info(f"Counter date (adjusted): {adjusted_ts.date()}")
-        
-        return df
-    
-    def load_all_files(self, mode: str = 'full') -> pd.DataFrame:
-        """
-        Load all Counters files.
-        
-        Parameters
-        ----------
-        mode : str
-            'full' or 'incremental'
-        
-        Returns
-        -------
-        pd.DataFrame
-            Combined DataFrame from all files
-        """
-        self.logger.info(f"Starting Counters ingestion (mode: {mode})")
-        
-        # Discover files
-        files_to_process = self.discover_files(mode)
-        
-        if not files_to_process:
-            self.logger.warning("No Counters files found to process")
-            return pd.DataFrame()
-        
-        # Load all files
-        all_dfs = []
-        for ww_str, file_path, modified_dt in files_to_process:
-            try:
-                df = self.load_single_file(ww_str, file_path, modified_dt)
-                all_dfs.append(df)
-            except Exception as e:
-                self.logger.error(f"Error loading {file_path}: {e}")
-                continue
-        
-        if not all_dfs:
-            self.logger.error("No Counters files loaded successfully")
-            return pd.DataFrame()
-        
-        # Combine all DataFrames
-        # Note: Different files may have different part counter columns
-        combined_df = pd.concat(all_dfs, ignore_index=True, sort=False)
-        
-        # Remove duplicates before loading to database
-        # Deduplicate on: FAB_ENTITY + counter_date
-        # Keep the most recent load (last occurrence)
-        before_dedup = len(combined_df)
-        combined_df = combined_df.drop_duplicates(
-            subset=['FAB_ENTITY', 'counter_date'],
-            keep='last'
-        )
-        after_dedup = len(combined_df)
+        # Remove duplicates based on ENTITY and counter_date
+        before_dedup = len(production_df)
+        production_df = production_df.drop_duplicates(subset=['ENTITY', 'counter_date'], keep='last')
+        after_dedup = len(production_df)
         
         if before_dedup > after_dedup:
-            self.logger.info(f"Removed {before_dedup - after_dedup} duplicate rows before database load")
+            logger.info(f"Removed {before_dedup - after_dedup} duplicate rows")
         
-        # Log column count
-        total_columns = len(combined_df.columns)
-        part_counter_columns = [col for col in combined_df.columns 
-                               if col not in ['ENTITY', 'FAB', 'FAB_ENTITY', 
-                                            'source_file', 'load_ww', 'load_ts', 
-                                            'counter_date', 'file_modified_ts']]
+        logger.info(f"Wafer production calculation complete: {len(production_df)} rows")
+        logger.info(f"Rows with wafers calculated: {production_df['wafers_produced'].notna().sum()}")
+        logger.info(f"Part replacements detected: {production_df['part_replacement_detected'].sum()}")
         
-        self.logger.info(f"Counters ingestion complete: {len(combined_df)} total rows from {len(all_dfs)} files")
-        self.logger.info(f"Total columns: {total_columns} (including {len(part_counter_columns)} part counter columns)")
-        
-        return combined_df
-    
-    def run(self, mode: str = 'full') -> pd.DataFrame:
-        """
-        Main entry point for Counters ingestion.
-        
-        Parameters
-        ----------
-        mode : str
-            'full' or 'incremental'
-        
-        Returns
-        -------
-        pd.DataFrame
-            Final DataFrame ready for Bronze table
-        """
-        return self.load_all_files(mode)
+        return production_df
 
 
-def run_counters_ingestion(config: Dict, mode: str = 'full') -> pd.DataFrame:
+def calculate_wafer_production(config: Dict, counters_df: pd.DataFrame, state_hours_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Standalone function to run Counters ingestion.
+    Standalone function to calculate wafer production.
     
     Parameters
     ----------
     config : dict
         Configuration dictionary
-    mode : str
-        'full' or 'incremental'
+    counters_df : pd.DataFrame
+        Counters Bronze data
+    state_hours_df : pd.DataFrame
+        State hours data with running_hours column
     
     Returns
     -------
     pd.DataFrame
-        Processed Counters data
+        Daily production metrics
     """
-    ingestion = CountersIngestion(config)
-    return ingestion.run(mode)
-
-
-if __name__ == "__main__":
-    # Test script
-    import sys
-    
-    # Setup logging
-    setup_logger(__name__, level='DEBUG')
-    
-    # Load config
-    config_path = Path(__file__).parent.parent.parent / 'config' / 'config.yaml'
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # Run ingestion
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'full'
-    df = run_counters_ingestion(config, mode=mode)
-    
-    print(f"\nCounters Ingestion Results:")
-    print(f"Total rows: {len(df)}")
-    print(f"Columns: {list(df.columns)[:10]}...")  # Show first 10 columns
-    print(f"\nSample data:")
-    print(df.head())
-    print(f"\nPart counter columns found: {len([c for c in df.columns if c.endswith('Counter')])}")
-
-
-
-
-
-
-
-
-
-
-
-
-    -- ============================================================================
--- Bronze Layer - Table Definitions
--- ============================================================================
--- Database: Parts_Counter_Production
--- Schema: dbo
--- Purpose: Raw mirror tables for EntityStates.csv and Counters_*.csv files
--- ============================================================================
-
-USE Parts_Counter_Production;
-GO
-
--- ============================================================================
--- entity_states_raw
--- ============================================================================
--- Purpose: Raw mirror of EntityStates.csv files
--- Grain: One row per entity per state per shift per day
--- Source: EntityStates.csv from weekly WW folders
--- ============================================================================
-
-DROP TABLE IF EXISTS dbo.entity_states_raw;
-GO
-
-CREATE TABLE dbo.entity_states_raw (
-    -- Primary Key
-    entity_state_raw_id INT IDENTITY(1,1) PRIMARY KEY,
-    
-    -- Source Data Columns
-    FAB VARCHAR(50) NOT NULL,
-    WW VARCHAR(20),
-    DAY_SHIFT VARCHAR(100) NOT NULL,
-    ENTITY_STATE VARCHAR(100) NOT NULL,
-    ENTITY VARCHAR(255) NOT NULL,
-    HOURS_IN_STATE DECIMAL(10,2),
-    Total_Hours DECIMAL(10,2),
-    [% in State] DECIMAL(10,4),
-    
-    -- Derived Columns
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    
-    -- Metadata Columns
-    source_file VARCHAR(500),
-    load_ww VARCHAR(20),
-    load_ts DATETIME2(7),
-    load_date DATE,
-    
-    -- Indexes for common queries
-    INDEX IX_entity_states_raw_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_entity_states_raw_ENTITY (ENTITY),
-    INDEX IX_entity_states_raw_DAY_SHIFT (DAY_SHIFT),
-    INDEX IX_entity_states_raw_load_date (load_date)
-);
-GO
-
-PRINT 'Table created: dbo.entity_states_raw';
-GO
-
-
--- ============================================================================
--- counters_raw
--- ============================================================================
--- Purpose: Raw mirror of Counters_*.csv files with ALL part counter columns
--- Grain: One row per entity per counter date
--- Source: Counters_*.csv from weekly WW folders (latest by modified date)
--- 
--- IMPORTANT: This table MUST be created dynamically on first pipeline run
--- based on actual CSV columns. The script below will be generated by the
--- Python pipeline during initial setup.
--- 
--- Manual Setup Instructions:
--- 1. Run the Python pipeline setup script FIRST: python -m etl.setup_counters_table
--- 2. It will read a sample Counters CSV and generate the full CREATE TABLE
--- 3. Then execute the generated script
--- 
--- DO NOT create this table manually with sample columns - you will lose data!
--- ============================================================================
-
--- This is a PLACEHOLDER - The actual table will be created by setup_counters_table.py
--- which reads the actual CSV columns and generates the full DDL
-
-PRINT '============================================================================';
-PRINT 'WARNING: counters_raw table requires DYNAMIC creation';
-PRINT '============================================================================';
-PRINT '';
-PRINT 'DO NOT create this table with sample columns!';
-PRINT '';
-PRINT 'REQUIRED SETUP STEPS:';
-PRINT '1. Ensure a sample Counters_*.csv file exists in a WW folder';
-PRINT '2. Run: python -m etl.setup_counters_table';
-PRINT '3. This will generate: sql/ddl/create_counters_raw_GENERATED.sql';
-PRINT '4. Execute the generated script to create the full table with ALL columns';
-PRINT '';
-PRINT 'The generated table will include:';
-PRINT '  - ENTITY VARCHAR(255)';
-PRINT '  - FAB VARCHAR(50)';
-PRINT '  - FAB_ENTITY VARCHAR(300)';
-PRINT '  - ALL part counter columns from CSV (300+ columns)';
-PRINT '  - source_file, load_ww, load_ts, counter_date, file_modified_ts';
-PRINT '';
-PRINT 'Skipping counters_raw creation - use setup script instead.';
-PRINT '============================================================================';
-GO
-
--- ============================================================================
--- Alternative: JSON-based Counters Table (More Flexible)
--- ============================================================================
--- Uncomment this section if you want to use JSON storage for dynamic columns
-/*
-DROP TABLE IF EXISTS dbo.counters_raw;
-GO
-
-CREATE TABLE dbo.counters_raw (
-    counters_raw_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    FAB VARCHAR(50) NOT NULL,
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    
-    -- Store all part counters as JSON
-    part_counters NVARCHAR(MAX),
-    
-    -- Metadata
-    source_file VARCHAR(500),
-    load_ww VARCHAR(20),
-    load_ts DATETIME2(7),
-    counter_date DATE NOT NULL,
-    file_modified_ts DATETIME2(7),
-    
-    INDEX IX_counters_raw_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_counters_raw_counter_date (counter_date)
-);
-GO
-*/
-
--- ============================================================================
--- Bronze Layer Tables Complete
--- ============================================================================
-PRINT '';
-PRINT 'Bronze layer tables created successfully.';
-PRINT 'Tables: entity_states_raw, counters_raw';
-GO
-
-
-
-
-
-
-
-
-
-
--- ============================================================================
--- Master Database Setup Script
--- ============================================================================
--- Entity States & Counters Pipeline
--- Database: Parts_Counter_Production
--- 
--- Purpose: Creates all tables for Bronze, Silver, and Gold layers
--- 
--- Usage:
---   Execute this script in SQL Server Management Studio
---   OR
---   Run individual layer scripts in order:
---     1. create_bronze_tables.sql
---     2. create_silver_tables.sql
---     3. create_gold_tables.sql
--- ============================================================================
-
-USE Parts_Counter_Production;
-GO
-
-PRINT '========================================';
-PRINT 'Entity & Counters Pipeline Setup';
-PRINT 'Starting database initialization...';
-PRINT '========================================';
-PRINT '';
-GO
-
--- ============================================================================
--- BRONZE LAYER - Raw Data Tables
--- ============================================================================
-
-PRINT '========================================';
-PRINT 'Creating BRONZE layer tables...';
-PRINT '========================================';
-PRINT '';
-GO
-
--- entity_states_raw
-DROP TABLE IF EXISTS dbo.entity_states_raw;
-GO
-
-CREATE TABLE dbo.entity_states_raw (
-    entity_state_raw_id INT IDENTITY(1,1) PRIMARY KEY,
-    FAB VARCHAR(50) NOT NULL,
-    WW VARCHAR(20),
-    DAY_SHIFT VARCHAR(100) NOT NULL,
-    ENTITY_STATE VARCHAR(100) NOT NULL,
-    ENTITY VARCHAR(255) NOT NULL,
-    HOURS_IN_STATE DECIMAL(10,2),
-    Total_Hours DECIMAL(10,2),
-    [% in State] DECIMAL(10,4),
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    source_file VARCHAR(500),
-    load_ww VARCHAR(20),
-    load_ts DATETIME2(7),
-    load_date DATE,
-    INDEX IX_entity_states_raw_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_entity_states_raw_ENTITY (ENTITY),
-    INDEX IX_entity_states_raw_DAY_SHIFT (DAY_SHIFT),
-    INDEX IX_entity_states_raw_load_date (load_date)
-);
-GO
-
-PRINT 'Created: dbo.entity_states_raw';
-GO
-
--- counters_raw
--- IMPORTANT: This table requires DYNAMIC creation based on actual CSV columns
--- DO NOT create with sample columns - you will lose data!
--- Run: python -m etl.setup_counters_table FIRST to generate the full DDL
-
-PRINT 'Skipping counters_raw - requires dynamic setup';
-PRINT 'Run: python -m etl.setup_counters_table to generate full DDL';
-PRINT '';
-GO
-
--- ============================================================================
--- SILVER LAYER - Enriched Data Tables
--- ============================================================================
-
-PRINT '========================================';
-PRINT 'Creating SILVER layer tables...';
-PRINT '========================================';
-PRINT '';
-GO
-
--- state_hours
-DROP TABLE IF EXISTS dbo.state_hours;
-GO
-
-CREATE TABLE dbo.state_hours (
-    state_hours_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    FAB VARCHAR(50) NOT NULL,
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    state_date DATE NOT NULL,
-    running_hours DECIMAL(10,2) DEFAULT 0,
-    idle_hours DECIMAL(10,2) DEFAULT 0,
-    down_hours DECIMAL(10,2) DEFAULT 0,
-    bagged_hours DECIMAL(10,2) DEFAULT 0,
-    total_hours DECIMAL(10,2) DEFAULT 0,
-    is_bagged BIT DEFAULT 0,
-    calculation_timestamp DATETIME2(7),
-    INDEX IX_state_hours_ENTITY_date (ENTITY, state_date),
-    INDEX IX_state_hours_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_state_hours_state_date (state_date),
-    CONSTRAINT UQ_state_hours_ENTITY_date UNIQUE (ENTITY, state_date)
-);
-GO
-
-PRINT 'Created: dbo.state_hours';
-GO
-
--- wafer_production
-DROP TABLE IF EXISTS dbo.wafer_production;
-GO
-
-CREATE TABLE dbo.wafer_production (
-    wafer_production_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    counter_date DATE NOT NULL,
-    counter_column_used VARCHAR(255),
-    counter_keyword_used VARCHAR(100),
-    counter_current_value DECIMAL(18,2),
-    counter_previous_value DECIMAL(18,2),
-    counter_change DECIMAL(18,2),
-    part_replacement_detected BIT DEFAULT 0,
-    wafers_produced DECIMAL(18,2),
-    running_hours DECIMAL(10,2),
-    wafers_per_hour DECIMAL(18,4),
-    calculation_notes VARCHAR(MAX),
-    calculation_timestamp DATETIME2(7),
-    INDEX IX_wafer_production_ENTITY_date (ENTITY, counter_date),
-    INDEX IX_wafer_production_counter_date (counter_date),
-    INDEX IX_wafer_production_replacements (part_replacement_detected),
-    CONSTRAINT UQ_wafer_production_ENTITY_date UNIQUE (ENTITY, counter_date)
-);
-GO
-
-PRINT 'Created: dbo.wafer_production';
-GO
-
--- part_replacements
-DROP TABLE IF EXISTS dbo.part_replacements;
-GO
-
-CREATE TABLE dbo.part_replacements (
-    part_replacement_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    replacement_date DATE NOT NULL,
-    part_counter_name VARCHAR(255) NOT NULL,
-    last_value_before_replacement DECIMAL(18,2),
-    first_value_after_replacement DECIMAL(18,2),
-    value_drop DECIMAL(18,2),
-    part_wafers_at_replacement DECIMAL(18,2),
-    notes VARCHAR(MAX),
-    replacement_detected_ts DATETIME2(7),
-    INDEX IX_part_replacements_ENTITY (ENTITY),
-    INDEX IX_part_replacements_date (replacement_date),
-    INDEX IX_part_replacements_part (part_counter_name),
-    INDEX IX_part_replacements_ENTITY_date (ENTITY, replacement_date),
-    CONSTRAINT UQ_part_replacements_ENTITY_date_part UNIQUE (ENTITY, replacement_date, part_counter_name)
-);
-GO
-
-PRINT 'Created: dbo.part_replacements';
-PRINT '';
-GO
-
--- ============================================================================
--- GOLD LAYER - KPI Fact Tables
--- ============================================================================
-
-PRINT '========================================';
-PRINT 'Creating GOLD layer tables...';
-PRINT '========================================';
-PRINT '';
-GO
-
--- fact_daily_production
-DROP TABLE IF EXISTS dbo.fact_daily_production;
-GO
-
-CREATE TABLE dbo.fact_daily_production (
-    daily_production_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    FAB VARCHAR(50) NOT NULL,
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    production_date DATE NOT NULL,
-    wafers_produced DECIMAL(18,2),
-    wafers_per_hour DECIMAL(18,4),
-    running_hours DECIMAL(10,2),
-    idle_hours DECIMAL(10,2),
-    down_hours DECIMAL(10,2),
-    bagged_hours DECIMAL(10,2),
-    total_hours DECIMAL(10,2),
-    is_bagged BIT DEFAULT 0,
-    part_replacement_detected BIT DEFAULT 0,
-    counter_column_used VARCHAR(255),
-    counter_keyword_used VARCHAR(100),
-    calculation_timestamp DATETIME2(7),
-    INDEX IX_fact_daily_production_ENTITY_date (ENTITY, production_date),
-    INDEX IX_fact_daily_production_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_fact_daily_production_date (production_date),
-    INDEX IX_fact_daily_production_FAB (FAB),
-    CONSTRAINT UQ_fact_daily_production_ENTITY_date UNIQUE (ENTITY, production_date)
-);
-GO
-
-PRINT 'Created: dbo.fact_daily_production';
-GO
-
--- fact_weekly_production
-DROP TABLE IF EXISTS dbo.fact_weekly_production;
-GO
-
-CREATE TABLE dbo.fact_weekly_production (
-    weekly_production_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    FAB VARCHAR(50) NOT NULL,
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    YEARWW VARCHAR(20) NOT NULL,
-    total_wafers_produced DECIMAL(18,2),
-    total_running_hours DECIMAL(10,2),
-    total_idle_hours DECIMAL(10,2),
-    total_down_hours DECIMAL(10,2),
-    total_bagged_hours DECIMAL(10,2),
-    total_hours DECIMAL(10,2),
-    avg_wafers_per_hour DECIMAL(18,4),
-    part_replacements_count INT DEFAULT 0,
-    week_start_date DATE,
-    week_end_date DATE,
-    days_with_data INT,
-    calculation_timestamp DATETIME2(7),
-    INDEX IX_fact_weekly_production_ENTITY_WW (ENTITY, YEARWW),
-    INDEX IX_fact_weekly_production_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_fact_weekly_production_YEARWW (YEARWW),
-    INDEX IX_fact_weekly_production_FAB (FAB),
-    CONSTRAINT UQ_fact_weekly_production_ENTITY_WW UNIQUE (ENTITY, YEARWW)
-);
-GO
-
-PRINT 'Created: dbo.fact_weekly_production';
-GO
-
--- fact_state_hours_daily
-DROP TABLE IF EXISTS dbo.fact_state_hours_daily;
-GO
-
-CREATE TABLE dbo.fact_state_hours_daily (
-    daily_state_hours_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    FAB VARCHAR(50) NOT NULL,
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    state_date DATE NOT NULL,
-    running_hours DECIMAL(10,2) DEFAULT 0,
-    idle_hours DECIMAL(10,2) DEFAULT 0,
-    down_hours DECIMAL(10,2) DEFAULT 0,
-    bagged_hours DECIMAL(10,2) DEFAULT 0,
-    total_hours DECIMAL(10,2) DEFAULT 0,
-    running_pct DECIMAL(10,4),
-    idle_pct DECIMAL(10,4),
-    down_pct DECIMAL(10,4),
-    is_bagged BIT DEFAULT 0,
-    calculation_timestamp DATETIME2(7),
-    INDEX IX_fact_state_hours_daily_ENTITY_date (ENTITY, state_date),
-    INDEX IX_fact_state_hours_daily_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_fact_state_hours_daily_date (state_date),
-    INDEX IX_fact_state_hours_daily_FAB (FAB),
-    CONSTRAINT UQ_fact_state_hours_daily_ENTITY_date UNIQUE (ENTITY, state_date)
-);
-GO
-
-PRINT 'Created: dbo.fact_state_hours_daily';
-GO
-
--- fact_state_hours_weekly
-DROP TABLE IF EXISTS dbo.fact_state_hours_weekly;
-GO
-
-CREATE TABLE dbo.fact_state_hours_weekly (
-    weekly_state_hours_id INT IDENTITY(1,1) PRIMARY KEY,
-    ENTITY VARCHAR(255) NOT NULL,
-    FAB VARCHAR(50) NOT NULL,
-    FAB_ENTITY VARCHAR(300) NOT NULL,
-    YEARWW VARCHAR(20) NOT NULL,
-    total_running_hours DECIMAL(10,2) DEFAULT 0,
-    total_idle_hours DECIMAL(10,2) DEFAULT 0,
-    total_down_hours DECIMAL(10,2) DEFAULT 0,
-    total_bagged_hours DECIMAL(10,2) DEFAULT 0,
-    total_hours DECIMAL(10,2) DEFAULT 0,
-    running_pct DECIMAL(10,4),
-    idle_pct DECIMAL(10,4),
-    down_pct DECIMAL(10,4),
-    was_bagged_any_day BIT DEFAULT 0,
-    week_start_date DATE,
-    week_end_date DATE,
-    days_with_data INT,
-    calculation_timestamp DATETIME2(7),
-    INDEX IX_fact_state_hours_weekly_ENTITY_WW (ENTITY, YEARWW),
-    INDEX IX_fact_state_hours_weekly_FAB_ENTITY (FAB_ENTITY),
-    INDEX IX_fact_state_hours_weekly_YEARWW (YEARWW),
-    INDEX IX_fact_state_hours_weekly_FAB (FAB),
-    CONSTRAINT UQ_fact_state_hours_weekly_ENTITY_WW UNIQUE (ENTITY, YEARWW)
-);
-GO
-
-PRINT 'Created: dbo.fact_state_hours_weekly';
-PRINT '';
-GO
-
--- ============================================================================
--- Setup Complete
--- ============================================================================
-
-PRINT '========================================';
-PRINT 'Database setup complete!';
-PRINT '========================================';
-PRINT '';
-PRINT 'BRONZE LAYER (2 tables):';
-PRINT '  - entity_states_raw';
-PRINT '  - counters_raw';
-PRINT '';
-PRINT 'SILVER LAYER (3 tables):';
-PRINT '  - state_hours';
-PRINT '  - wafer_production';
-PRINT '  - part_replacements';
-PRINT '';
-PRINT 'GOLD LAYER (4 tables):';
-PRINT '  - fact_daily_production';
-PRINT '  - fact_weekly_production';
-PRINT '  - fact_state_hours_daily';
-PRINT '  - fact_state_hours_weekly';
-PRINT '';
-PRINT 'Total: 9 tables created';
-PRINT '';
-PRINT 'Next steps:';
-PRINT '  1. Run the ETL pipeline to populate Bronze tables';
-PRINT '  2. Execute Silver enrichment calculations';
-PRINT '  3. Execute Gold aggregations';
-PRINT '  4. Connect Power BI to Gold fact tables';
-PRINT '========================================';
-GO
-
-
+    calculator = WaferProductionCalculator(config)
+    return calculator.calculate_for_dataframe(counters_df, state_hours_df)
