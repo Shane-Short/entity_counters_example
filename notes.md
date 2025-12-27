@@ -1,58 +1,49 @@
-# Find files for each work week
-        files_to_process = []
+def load_dataframe(self, df: pd.DataFrame, if_exists: str = 'append') -> int:
+        """
+        Load DataFrame to SQL Server table.
+        """
+        if df.empty:
+            logger.warning("DataFrame is empty, nothing to load")
+            return 0
         
-        # Get search range once (up to 4 weeks back)
-        search_weeks = get_recent_work_weeks(4)
+        logger.info(f"Loading {len(df)} rows to {self.table_name}")
         
-        for ww_str in work_weeks:
-            file_found = False
-            
-            # Search backwards through available weeks
-            for search_ww in search_weeks:
-                ww_folder = root_path / search_ww
-                file_path = ww_folder / file_name
-                
-                if file_path.exists():
-                    files_to_process.append((ww_str, file_path))
-                    if search_ww != ww_str:
-                        self.logger.info(f"EntityStates file for {ww_str} found in {search_ww}: {file_path}")
-                    else:
-                        self.logger.info(f"Found EntityStates file for {ww_str}: {file_path}")
-                    file_found = True
-                    break
-            
-            if not file_found:
-                self.logger.warning(f"EntityStates file not found for {ww_str} (searched back 4 weeks)")
-
-
-
-
-
-
-# Find latest Counters file for each work week
-        files_to_process = []
+        conn = self.get_connection()
+        cursor = conn.cursor()
         
-        # Get search range once (up to 4 weeks back)
-        search_weeks = get_recent_work_weeks(4)
+        try:
+            # Get column names
+            columns = df.columns.tolist()
+            
+            # Build INSERT statement
+            placeholders = ','.join(['?' for _ in columns])
+            columns_str = ','.join([f"[{col}]" for col in columns])
+            
+            insert_sql = f"""
+                INSERT INTO {self.schema}.{self.table_name} ({columns_str})
+                VALUES ({placeholders})
+            """
+            
+            # Convert DataFrame to list of tuples
+            data_tuples = [tuple(row) for row in df.values]
+            
+            logger.info(f"Inserting {len(data_tuples)} rows using fast_executemany")
+            
+            # Use fast_executemany for bulk insert
+            cursor.fast_executemany = True
+            cursor.executemany(insert_sql, data_tuples)
+            conn.commit()
+            
+            rows_inserted = len(data_tuples)
+            logger.info(f"Successfully loaded {rows_inserted} rows to {self.table_name}")
+            
+            return rows_inserted
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error loading data to {self.table_name}: {e}")
+            raise
         
-        for ww_str in work_weeks:
-            file_found = False
-            
-            # Search backwards through available weeks
-            for search_ww in search_weeks:
-                result = find_latest_counters_file(root_path, search_ww, file_prefix)
-                if result:
-                    file_path, modified_dt = result
-                    files_to_process.append((ww_str, file_path, modified_dt))
-                    if search_ww != ww_str:
-                        self.logger.info(f"Counters file for {ww_str} found in {search_ww}: {file_path.name}")
-                    file_found = True
-                    break
-            
-            if not file_found:
-                self.logger.warning(f"No Counters file found for {ww_str} (searched back 4 weeks)")
-
-
-
-
-
+        finally:
+            cursor.close()
+            conn.close()
