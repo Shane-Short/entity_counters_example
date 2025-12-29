@@ -1,50 +1,67 @@
-try:
-            # Get column names
-            columns = df.columns.tolist()
-            
-            # Build INSERT statement
-            placeholders = ','.join(['?' for _ in columns])
-            columns_str = ','.join([f"[{col}]" for col in columns])
-            
-            insert_sql = f"""
-                INSERT INTO {self.schema}.{self.table_name} ({columns_str})
-                VALUES ({placeholders})
-            """
-            
-            # Convert DataFrame to list of tuples
-            data_tuples = [tuple(row) for row in df.values]
-            
-            logger.info(f"Inserting {len(data_tuples)} rows using fast_executemany")
-            
-            # Use fast_executemany for bulk insert
-            cursor.fast_executemany = True
-            cursor.executemany(insert_sql, data_tuples)
-            conn.commit()
-            
-            rows_inserted = len(data_tuples)
-            logger.info(f"Successfully loaded {rows_inserted} rows to {self.table_name}")
-            
-            return rows_inserted
-            
-        except Exception as e:
-            conn.rollback()
-            
-            # Enhanced error logging - check which column is causing the issue
-            error_msg = str(e)
-            logger.error(f"Error loading data to {self.table_name}: {e}")
-            
-            if 'String data, right truncation' in error_msg:
-                logger.error("STRING TRUNCATION ERROR DETECTED - Checking column lengths...")
-                
-                # Check max length of each string column
-                for col in df.columns:
-                    if df[col].dtype == 'object':
-                        max_len = df[col].astype(str).str.len().max()
-                        logger.error(f"  Column: {col:30} Max Length: {max_len}")
-                        
-                        # Show sample of longest values
-                        longest_idx = df[col].astype(str).str.len().idxmax()
-                        longest_val = str(df[col].iloc[longest_idx])
-                        logger.error(f"    Longest value ({len(longest_val)} chars): {longest_val[:100]}...")
-            
-            raise
+def truncate_tables(self, layer: str = 'all'):
+        """
+        Truncate tables for specified layer(s).
+        
+        Parameters
+        ----------
+        layer : str
+            Which layer(s) to truncate: 'bronze', 'silver', 'gold', 'all'
+        """
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("TRUNCATING TABLES")
+        logger.info("=" * 80)
+        
+        # Build connection string
+        sqlserver_config = self.config['table_parameters']['ENTITY_STATES_SQLSERVER_OUTPUT']['sqlserver']
+        
+        conn_str = (
+            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+            f"SERVER={sqlserver_config['server']};"
+            f"DATABASE={sqlserver_config['database']};"
+            f"UID={sqlserver_config['username']};"
+            f"PWD={sqlserver_config['password']};"
+            f"TrustServerCertificate=yes;"
+        )
+        
+        import pyodbc
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+        
+        tables_to_truncate = []
+        
+        # Determine which tables to truncate based on layer
+        if layer in ['bronze', 'all']:
+            tables_to_truncate.extend([
+                'entity_states_raw',
+                'counters_raw'
+            ])
+        
+        if layer in ['silver', 'all']:
+            tables_to_truncate.extend([
+                'state_hours',
+                'wafer_production',
+                'part_replacements'
+            ])
+        
+        if layer in ['gold', 'all']:
+            tables_to_truncate.extend([
+                'fact_daily_production',
+                'fact_weekly_production',
+                'fact_state_hours_daily',
+                'fact_state_hours_weekly'
+            ])
+        
+        # Truncate tables
+        for table in tables_to_truncate:
+            try:
+                cursor.execute(f"TRUNCATE TABLE dbo.{table}")
+                conn.commit()
+                logger.info(f"  Truncated: {table}")
+            except Exception as e:
+                logger.warning(f"  Could not truncate {table}: {e}")
+        
+        cursor.close()
+        conn.close()
+        
+        logger.info(f"Truncated {len(tables_to_truncate)} tables")
