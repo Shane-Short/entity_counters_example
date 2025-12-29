@@ -1,58 +1,33 @@
-def truncate_tables(self, layer: str = 'all'):
-        """
-        Truncate tables for specified layer(s).
-        
-        Parameters
-        ----------
-        layer : str
-            Which layer(s) to truncate: 'bronze', 'silver', 'gold', 'all'
-        """
-        logger.info("")
-        logger.info("=" * 80)
-        logger.info("TRUNCATING TABLES")
-        logger.info("=" * 80)
-        
-        from utils.database_engine import SQLServerEngine
-        
-        # Use SQLServerEngine to get proper connection
-        engine = SQLServerEngine(self.config, 'ENTITY_STATES_SQLSERVER_OUTPUT')
-        conn = engine.get_connection()
-        cursor = conn.cursor()
-        
-        tables_to_truncate = []
-        
-        # Determine which tables to truncate based on layer
-        if layer in ['bronze', 'all']:
-            tables_to_truncate.extend([
-                'entity_states_raw',
-                'counters_raw'
-            ])
-        
-        if layer in ['silver', 'all']:
-            tables_to_truncate.extend([
-                'state_hours',
-                'wafer_production',
-                'part_replacements'
-            ])
-        
-        if layer in ['gold', 'all']:
-            tables_to_truncate.extend([
-                'fact_daily_production',
-                'fact_weekly_production',
-                'fact_state_hours_daily',
-                'fact_state_hours_weekly'
-            ])
-        
-        # Truncate tables
-        for table in tables_to_truncate:
-            try:
-                cursor.execute(f"TRUNCATE TABLE dbo.{table}")
-                conn.commit()
-                logger.info(f"  Truncated: {table}")
-            except Exception as e:
-                logger.warning(f"  Could not truncate {table}: {e}")
-        
-        cursor.close()
-        conn.close()
-        
-        logger.info(f"Truncated {len(tables_to_truncate)} tables")
+def load_csv_safe(file_path: Path, expected_columns: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Safely load CSV file with encoding handling.
+    """
+    try:
+        df = pd.read_csv(file_path, encoding='utf-8')
+        logger.info(f"Successfully read CSV, shape: {df.shape}")
+        return df
+    except UnicodeDecodeError:
+        logger.warning(f"UTF-8 encoding failed for {file_path}, trying latin-1")
+        df = pd.read_csv(file_path, encoding='latin-1')
+        logger.info(f"Successfully read CSV with latin-1, shape: {df.shape}")
+        return df
+
+
+
+
+
+
+# Load CSV
+df = load_csv_safe(file_path, expected_columns=None)
+
+# Clean counter columns: replace empty strings with NaN for numeric columns only
+# All counter columns end with 'Counter' and should be numeric
+counter_cols = [col for col in df.columns if col.endswith('Counter')]
+for col in counter_cols:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+
+
+
+
+
