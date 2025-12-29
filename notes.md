@@ -1,106 +1,110 @@
-def calculate_wafer_production_single_row(self, 
-                                             current_row: pd.Series,
-                                             previous_row: Optional[pd.Series],
-                                             running_hours: float) -> Dict:
+def classify_state(self, state: str) -> str:
         """
-        Calculate wafer production for a single entity-date row.
+        Classify entity state into category.
         
-        Logic:
-        1. Find first counter > 1000 in CURRENT row
-        2. Use THAT SAME counter to compare with previous row
-        3. Calculate change using same counter column for both days
+        Categories:
+        - running: Running1-8
+        - idle: UpToProduction states
+        - bagged: Exact 'Bagged' match
+        - down: Everything else (WaitingTechnician, UnschWaitSupplier, etc.)
+        
+        Note: All states are now tracked individually as well
         
         Parameters
         ----------
-        current_row : pd.Series
-            Current day row with counter data
-        previous_row : pd.Series or None
-            Previous day row
-        running_hours : float
-            Running state hours for this day
+        state : str
+            Entity state string
         
         Returns
         -------
-        Dict
-            Dictionary with production metrics
+        str
+            State category
         """
-        entity = current_row['ENTITY']
-        date = str(current_row['counter_date'])
+        if not state or pd.isna(state):
+            return 'down'
         
-        result = {
-            'ENTITY': entity,
-            'counter_date': current_row['counter_date'],
-            'counter_column_used': None,
-            'counter_keyword_used': 'auto',
-            'counter_current_value': None,
-            'counter_previous_value': None,
-            'counter_change': None,
-            'part_replacement_detected': False,
-            'wafers_produced': None,
-            'running_hours': running_hours,
-            'wafers_per_hour': None,
-            'calculation_notes': []
-        }
+        state_clean = str(state).strip()
         
-        # STEP 1: Find first counter > 1000 in CURRENT row
-        counter_found = self.find_counter_column(current_row)
+        # Running states
+        running_states = self.config.get('running_states', [
+            'Running1', 'Running2', 'Running3', 'Running4',
+            'Running5', 'Running6', 'Running7', 'Running8'
+        ])
+        if state_clean in running_states:
+            return 'running'
         
-        if not counter_found:
-            result['calculation_notes'].append('No counter found with value > 1000')
-            return result
+        # Idle states (UpToProduction)
+        if 'UpToProduction' in state_clean:
+            return 'idle'
         
-        counter_col, current_val, _ = counter_found
-        result['counter_column_used'] = counter_col
-        result['counter_current_value'] = current_val
+        # Bagged
+        if state_clean == 'Bagged':
+            return 'bagged'
         
-        logger.debug(f"{entity} ({date}): Using counter '{counter_col}' (value: {current_val})")
-        
-        # STEP 2: Check if we have previous row
-        if previous_row is None:
-            result['calculation_notes'].append('First day - no previous value')
-            return result
-        
-        # STEP 3: Get value from SAME counter column in previous row
-        if counter_col not in previous_row.index:
-            result['calculation_notes'].append(f'Counter {counter_col} not in previous row')
-            return result
-        
-        previous_val = previous_row[counter_col]
-        if pd.isna(previous_val):
-            result['calculation_notes'].append(f'Previous value for {counter_col} is null')
-            return result
-        
-        result['counter_previous_value'] = previous_val
-        change = current_val - previous_val
-        result['counter_change'] = change
-        
-        # STEP 4: Check for negative change (part replacement)
-        if change < 0:
-            logger.debug(f"{entity} ({date}): Negative change detected: {counter_col} went from {previous_val} to {current_val} (change: {change})")
-            
-            # Check if it's a part replacement (threshold: -1000)
-            if change < self.replacement_threshold:
-                result['part_replacement_detected'] = True
-                result['calculation_notes'].append(f'Part replacement: {counter_col} reset from {previous_val} to {current_val}')
-                logger.info(f"PART REPLACEMENT - {entity} ({date}): {counter_col} dropped {change}")
-                
-                # Set change to 0 for part replacement
-                result['counter_change'] = 0
-                result['calculation_notes'].append('Counter change set to 0 (part replacement)')
-            else:
-                # Small negative change - might be data error, set to 0
-                result['counter_change'] = 0
-                result['calculation_notes'].append(f'Small negative change ({change}) - set to 0')
-        
-        # STEP 5: Calculate wafers produced and wafers per hour
-        if result['counter_change'] is not None and result['counter_change'] >= 0:
-            result['wafers_produced'] = result['counter_change']
-            
-            if running_hours > 0:
-                result['wafers_per_hour'] = result['wafers_produced'] / running_hours
-            else:
-                result['calculation_notes'].append('No running hours - cannot calculate wafers/hour')
-        
-        return result
+        # Everything else is "down" (no longer log as unknown)
+        return 'down'
 
 
+
+
+
+
+
+
+
+def aggregate_by_state(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Aggregate hours by entity, date, and individual state.
+        Creates a detailed breakdown of all states.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            EntityStates data
+        
+        Returns
+        -------
+        pd.DataFrame
+            Aggregated by entity, date, and each unique state
+        """
+        # Group by ENTITY, state_date, and actual ENTITY_STATE
+        state_detail = df.groupby(['ENTITY', 'state_date', 'ENTITY_STATE'])['HOURS_IN_STATE'].sum().reset_index()
+        state_detail = state_detail.rename(columns={'HOURS_IN_STATE': 'hours', 'ENTITY_STATE': 'state_name'})
+        
+        logger.info(f"Detailed state tracking: {len(state_detail)} entity-date-state combinations")
+        logger.info(f"Unique states found: {state_detail['state_name'].nunique()}")
+        
+        return state_detail
+
+
+
+
+# Group by entity
+        for entity, entity_group in counters_df.groupby('ENTITY'):
+            entity_group = entity_group.sort_values('counter_date').reset_index(drop=True)
+            
+            # Skip if only 1 day of data - can't calculate production without previous day
+            if len(entity_group) == 1:
+                logger.debug(f"Skipping {entity}: only 1 day of data, no previous comparison possible")
+                # Still create a result row but with no wafer calculation
+                result = {
+                    'ENTITY': entity,
+                    'counter_date': entity_group.iloc[0]['counter_date'],
+                    'counter_column_used': None,
+                    'counter_keyword_used': None,
+                    'counter_current_value': None,
+                    'counter_previous_value': None,
+                    'counter_change': None,
+                    'part_replacement_detected': False,
+                    'wafers_produced': None,
+                    'running_hours': 0,
+                    'wafers_per_hour': None,
+                    'calculation_notes': ['Only 1 day of data - no previous comparison']
+                }
+                results.append(result)
+                continue
+            
+            # Process each day
+            for idx, current_row in entity_group.iterrows():
+                # Get previous row (only within same entity)
+                previous_row = entity_group.iloc[idx - 1] if idx > 0 else None
