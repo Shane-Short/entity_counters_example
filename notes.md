@@ -1,33 +1,10 @@
-def load_csv_safe(file_path: Path, expected_columns: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Safely load CSV file with encoding handling.
-    """
-    try:
-        df = pd.read_csv(file_path, encoding='utf-8')
-        logger.info(f"Successfully read CSV, shape: {df.shape}")
-        return df
-    except UnicodeDecodeError:
-        logger.warning(f"UTF-8 encoding failed for {file_path}, trying latin-1")
-        df = pd.read_csv(file_path, encoding='latin-1')
-        logger.info(f"Successfully read CSV with latin-1, shape: {df.shape}")
-        return df
-
-
-
-
-
-
-# Load CSV
-df = load_csv_safe(file_path, expected_columns=None)
-
-# Clean counter columns: replace empty strings with NaN for numeric columns only
-# All counter columns end with 'Counter' and should be numeric
-counter_cols = [col for col in df.columns if col.endswith('Counter')]
-for col in counter_cols:
-    df[col] = pd.to_numeric(df[col], errors='coerce')
-
-
-
-
-
-
+# DEBUG: Check for NULLs in DataFrame before conversion
+        logger.info(f"Checking DataFrame for NULL values before insert into {self.table_name}")
+        for col in df.columns:
+            null_count = df[col].isna().sum()
+            if null_count > 0:
+                logger.error(f"  Column '{col}' has {null_count} NULL values")
+        
+        # Convert DataFrame to list of tuples, replacing NaN with None
+        df_clean = df.replace({pd.NA: None, float('nan'): None, float('inf'): None, float('-inf'): None})
+        data_tuples = [tuple(None if pd.isna(x) else x for x in row) for row in df_clean.values]
