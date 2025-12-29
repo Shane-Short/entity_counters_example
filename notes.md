@@ -1,10 +1,45 @@
-# DEBUG: Check for NULLs in DataFrame before conversion
-        logger.info(f"Checking DataFrame for NULL values before insert into {self.table_name}")
-        for col in df.columns:
-            null_count = df[col].isna().sum()
-            if null_count > 0:
-                logger.error(f"  Column '{col}' has {null_count} NULL values")
+def find_counter_column(self, row: pd.Series, keywords: List[str] = None) -> Optional[Tuple[str, float, str]]:
+        """
+        Find first counter column with value > 1000.
+        Simple approach: use first valid counter regardless of keywords.
         
-        # Convert DataFrame to list of tuples, replacing NaN with None
-        df_clean = df.replace({pd.NA: None, float('nan'): None, float('inf'): None, float('-inf'): None})
-        data_tuples = [tuple(None if pd.isna(x) else x for x in row) for row in df_clean.values]
+        Parameters
+        ----------
+        row : pd.Series
+            DataFrame row
+        keywords : List[str], optional
+            Not used - kept for compatibility
+        
+        Returns
+        -------
+        Tuple[str, float, str] or None
+            (column_name, value, 'auto') if found, None otherwise
+        """
+        # Get all counter columns
+        counter_cols = [col for col in row.index if col.endswith('Counter')]
+        
+        # Find first counter with value > 1000
+        for col in counter_cols:
+            value = row[col]
+            if pd.notna(value) and value > 1000:
+                return (col, value, 'auto')
+        
+        return None
+
+
+
+
+
+
+
+if not counter_found:
+            result['calculation_notes'].append('No counter found with value > 1000')
+            return result
+
+
+
+
+
+
+
+            
