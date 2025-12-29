@@ -12,20 +12,11 @@ def truncate_tables(self, layer: str = 'all'):
         logger.info("TRUNCATING TABLES")
         logger.info("=" * 80)
         
-        # Build connection string
-        sqlserver_config = self.config['table_parameters']['ENTITY_STATES_SQLSERVER_OUTPUT']['sqlserver']
+        from utils.database_engine import SQLServerEngine
         
-        conn_str = (
-            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-            f"SERVER={sqlserver_config['server']};"
-            f"DATABASE={sqlserver_config['database']};"
-            f"UID={sqlserver_config['username']};"
-            f"PWD={sqlserver_config['password']};"
-            f"TrustServerCertificate=yes;"
-        )
-        
-        import pyodbc
-        conn = pyodbc.connect(conn_str)
+        # Use SQLServerEngine to get proper connection
+        engine = SQLServerEngine(self.config, 'ENTITY_STATES_SQLSERVER_OUTPUT')
+        conn = engine.get_connection()
         cursor = conn.cursor()
         
         tables_to_truncate = []
