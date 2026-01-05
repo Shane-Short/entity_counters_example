@@ -1,25 +1,25 @@
-elif layer == 'silver':
-                # Read from Bronze tables
-                logger.info("Reading data from Bronze tables")
-                from utils.database_engine import SQLServerEngine
-                
-                # Read entity_states_raw
-                engine_es = SQLServerEngine(self.config, 'ENTITY_STATES_SQLSERVER_OUTPUT')
-                conn = engine_es.get_connection()
-                entity_states_df = pd.read_sql("SELECT * FROM dbo.entity_states_raw", conn)
-                conn.close()
-                logger.info(f"Read {len(entity_states_df)} rows from entity_states_raw")
-                
-                # Read counters_raw
-                engine_counters = SQLServerEngine(self.config, 'COUNTERS_SQLSERVER_OUTPUT')
-                conn = engine_counters.get_connection()
-                counters_df = pd.read_sql("SELECT * FROM dbo.counters_raw", conn)
-                conn.close()
-                logger.info(f"Read {len(counters_df)} rows from counters_raw")
-                
-                # Run Silver
-                self.run_silver_layer(entity_states_df, counters_df, mode=mode)
-
-
+def get_connection(self):
+        """
+        Get database connection with retry logic.
+        """
+        import time
+        
+        conn_str = self.get_connection_string()
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Connecting to SQL Server (attempt {attempt + 1}/{max_retries})")
+                conn = pyodbc.connect(conn_str, timeout=600)
+                logger.info("Connection successful")
+                return conn
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10  # 10, 20, 30 seconds
+                    logger.warning(f"Connection failed: {e}. Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Connection failed after {max_retries} attempts")
+                    raise
 
 
