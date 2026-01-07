@@ -1,25 +1,34 @@
-def get_connection(self):
+def get_connection_string(self) -> str:
         """
-        Get database connection with retry logic.
+        Build SQL Server connection string using TCP/IP.
         """
-        import time
+        # Parse server to add port if not specified
+        if '\\' in self.server:
+            # Format: SERVERNAME\INSTANCE
+            server_tcp = f"tcp:{self.server}"
+        elif ',' not in self.server:
+            # Add default port 1433
+            server_tcp = f"tcp:{self.server},1433"
+        else:
+            # Port already specified
+            server_tcp = f"tcp:{self.server}"
         
-        conn_str = self.get_connection_string()
-        max_retries = 3
+        if self.trusted_connection:
+            conn_str = (
+                f"DRIVER={{{self.driver}}};"
+                f"SERVER={server_tcp};"
+                f"DATABASE={self.database};"
+                f"Trusted_Connection=yes;"
+                f"TrustServerCertificate=yes;"
+            )
+        else:
+            conn_str = (
+                f"DRIVER={{{self.driver}}};"
+                f"SERVER={server_tcp};"
+                f"DATABASE={self.database};"
+                f"UID={self.username};"
+                f"PWD={self.password};"
+                f"TrustServerCertificate=yes;"
+            )
         
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Connecting to SQL Server (attempt {attempt + 1}/{max_retries})")
-                conn = pyodbc.connect(conn_str, timeout=600)
-                logger.info("Connection successful")
-                return conn
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 10  # 10, 20, 30 seconds
-                    logger.warning(f"Connection failed: {e}. Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Connection failed after {max_retries} attempts")
-                    raise
-
-
+        return conn_str
