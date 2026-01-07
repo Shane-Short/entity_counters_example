@@ -9,14 +9,19 @@
     if not replacements_df.empty:
         logger.info(f"Part replacements tracked: {len(replacements_df)} events")
         
-        # DEBUG: Check data types
-        logger.info("Part replacements DataFrame dtypes:")
-        logger.info(f"\n{replacements_df.dtypes}")
+        # FIX: Convert replacement_date to proper date format (remove timezone, ensure DATE not DATETIME)
+        if 'replacement_date' in replacements_df.columns:
+            replacements_df['replacement_date'] = pd.to_datetime(replacements_df['replacement_date']).dt.date
         
-        # DEBUG: Check for problematic values
-        for col in replacements_df.columns:
-            if replacements_df[col].dtype == 'object':
-                logger.info(f"Column {col} sample values: {replacements_df[col].head(3).tolist()}")
+        # FIX: Convert replacement_detected_ts to timezone-naive datetime
+        if 'replacement_detected_ts' in replacements_df.columns:
+            replacements_df['replacement_detected_ts'] = pd.to_datetime(replacements_df['replacement_detected_ts'])
+            if replacements_df['replacement_detected_ts'].dt.tz is not None:
+                replacements_df['replacement_detected_ts'] = replacements_df['replacement_detected_ts'].dt.tz_localize(None)
+        
+        # DEBUG: Check data types AFTER conversion
+        logger.info("Part replacements DataFrame dtypes (after conversion):")
+        logger.info(f"\n{replacements_df.dtypes}")
         
         rows_loaded = load_to_sqlserver(
             replacements_df,
@@ -27,10 +32,3 @@
         logger.info(f"Part replacements: {rows_loaded} rows loaded")
     else:
         logger.info("No part replacements detected")
-    
-    logger.info("SILVER LAYER COMPLETE")
-    
-    return state_hours_df, production_df, replacements_df
-
-
-
