@@ -1,34 +1,27 @@
-def get_connection_string(self) -> str:
-        """
-        Build SQL Server connection string using TCP/IP.
-        """
-        # Parse server to add port if not specified
-        if '\\' in self.server:
-            # Format: SERVERNAME\INSTANCE
-            server_tcp = f"tcp:{self.server}"
-        elif ',' not in self.server:
-            # Add default port 1433
-            server_tcp = f"tcp:{self.server},1433"
-        else:
-            # Port already specified
-            server_tcp = f"tcp:{self.server}"
-        
-        if self.trusted_connection:
-            conn_str = (
-                f"DRIVER={{{self.driver}}};"
-                f"SERVER={server_tcp};"
-                f"DATABASE={self.database};"
-                f"Trusted_Connection=yes;"
-                f"TrustServerCertificate=yes;"
-            )
-        else:
-            conn_str = (
-                f"DRIVER={{{self.driver}}};"
-                f"SERVER={server_tcp};"
-                f"DATABASE={self.database};"
-                f"UID={self.username};"
-                f"PWD={self.password};"
-                f"TrustServerCertificate=yes;"
-            )
-        
-        return conn_str
+-- ============================================================================
+-- Silver Layer - State Hours Detail
+-- ============================================================================
+IF OBJECT_ID('dbo.state_hours_detail', 'U') IS NOT NULL
+    DROP TABLE dbo.state_hours_detail;
+GO
+
+CREATE TABLE dbo.state_hours_detail (
+    state_hours_detail_id INT IDENTITY(1,1) PRIMARY KEY,
+    ENTITY VARCHAR(255) NOT NULL,
+    FAB VARCHAR(100),
+    state_date DATE NOT NULL,
+    state_name VARCHAR(200) NOT NULL,
+    state_category VARCHAR(50),
+    hours DECIMAL(10,2),
+    calculation_timestamp DATETIME2(7) DEFAULT GETDATE(),
+    CONSTRAINT UQ_state_hours_detail UNIQUE (ENTITY, state_date, state_name)
+);
+GO
+
+CREATE INDEX IX_state_hours_detail_entity ON dbo.state_hours_detail(ENTITY);
+CREATE INDEX IX_state_hours_detail_date ON dbo.state_hours_detail(state_date);
+CREATE INDEX IX_state_hours_detail_state ON dbo.state_hours_detail(state_name);
+GO
+
+PRINT 'Created: dbo.state_hours_detail';
+GO
