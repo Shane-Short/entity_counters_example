@@ -1,55 +1,57 @@
-def main(full_refresh=False):
-    """Main execution."""
-    print("=" * 80)
-    print("DATABASE SETUP - Creating ALL Tables")
-    if full_refresh:
-        print("MODE: FULL REFRESH (dropping existing tables)")
-    print("=" * 80)
+def get_database_connection(config: Dict, environment: str = None) -> pyodbc.Connection:
+    """
+    Get generic database connection without table-specific information.
+    Uses environment specified in runtime.runtime_env if not provided.
     
-    # Load config
-    config_path = Path('config/config.yaml')
-    if not config_path.exists():
-        print(f"ERROR: Config file not found: {config_path}")
-        return
+    Parameters
+    ----------
+    config : dict
+        Configuration dictionary
+    environment : str, optional
+        Environment name. If None, uses config['runtime']['runtime_env']
     
-    # Load and substitute environment variables
+    Returns
+    -------
+    pyodbc.Connection
+        Database connection
+    """
     import os
     from dotenv import load_dotenv
-    import re
     
     load_dotenv()
     
-    with open(config_path, 'r') as f:
-        config_text = f.read()
-    
-    # Substitute environment variables
-    def replace_env_vars(match):
-        var_name = match.group(1)
-        return os.getenv(var_name, match.group(0))
-    
-    config_text = re.sub(r'\$\{([^}]+)\}', replace_env_vars, config_text)
-    config = yaml.safe_load(config_text)
-    
-    # Get runtime environment from config
-    runtime_env = config['runtime']['runtime_env']
-    print(f"Using runtime environment: {runtime_env}")
+    # Get environment
+    if environment is None:
+        environment = config['runtime']['runtime_env']
     
     # Get environment config
-    env_config = config['environments'][runtime_env]
+    env_config = config['environments'][environment]['sqlserver']
     
-    # Use SQLServerEngine to get connection (reuse existing logic)
-    print("\nConnecting to SQL Server...")
+    # Get values with environment variable substitution
+    server = os.getenv('SQL_SERVER', env_config.get('server', ''))
+    port = os.getenv('SQL_PORT', env_config.get('port', '1433'))
+    username = os.getenv('SQL_USERNAME', env_config.get('username', ''))
+    password = os.getenv('SQL_PASSWORD', env_config.get('password', ''))
+    driver = env_config.get('driver', 'ODBC Driver 18 for SQL Server')
+    database = env_config['database']
     
-    # Create a minimal config for SQLServerEngine
-    temp_config = {
-        'table_parameters': {
-            'TEMP': {
-                'sqlserver': env_config
-            }
-        }
-    }
+    # Build server string (no tcp: prefix for instance names)
+    if '\\' in server:
+        server_str = server  # Instance name format
+    elif ',' in server:
+        server_str = server  # Port already specified
+    else:
+        server_str = f"{server},{port}" if port else server
     
-    from utils.database_engine import SQLServerEngine
-    engine = SQLServerEngine(temp_config, 'TEMP')
-    conn = engine.get_connection()
-    print("  Connected successfully!")
+    # Build connection string
+    conn_str = (
+        f"DRIVER={{{driver}}};"
+        f"SERVER={server_str};"
+        f"DATABASE={database};"
+        f"UID={username};"
+        f"PWD={password};"
+        f"TrustServerCertificate=yes;"
+    )
+    
+    logger.debug(f"Connecting to {server_str}/{database}")
+    return pyodbc.connect(conn_str, timeout=30)
