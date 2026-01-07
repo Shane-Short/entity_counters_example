@@ -1,39 +1,73 @@
-def aggregate_by_state(self, df: pd.DataFrame) -> pd.DataFrame:
+def run_silver_enrichment(config: Dict, entity_states_df: pd.DataFrame, counters_df: pd.DataFrame, mode: str = 'full'):
     """
-    Aggregate hours by entity, date, and individual state.
+    Run Silver layer enrichment.
     """
-    # Extract date from DAY_SHIFT (format: "12/31 - S7")
-    date_str = df['DAY_SHIFT'].str.split(' - ').str[0]
+    from utils.database_engine import load_to_sqlserver
     
-    # Add year from load_date column
-    year = pd.to_datetime(df['load_date']).dt.year
-    df['state_date'] = pd.to_datetime(year.astype(str) + '/' + date_str).dt.date
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info(f"SILVER LAYER - {mode.upper()} MODE")
+    logger.info("=" * 80)
     
-    # Group by ENTITY, state_date, and actual ENTITY_STATE - SUM to combine duplicates
-    state_detail = df.groupby(['ENTITY', 'FAB', 'state_date', 'ENTITY_STATE'], as_index=False).agg({
-        'HOURS_IN_STATE': 'sum'
-    })
+    # STEP 1: Calculate state hours
+    logger.info("STEP 1: Calculating state hours")
+    state_hours_df = calculate_state_hours(config, entity_states_df)
     
-    state_detail = state_detail.rename(columns={'HOURS_IN_STATE': 'hours', 'ENTITY_STATE': 'state_name'})
+    if not state_hours_df.empty:
+        logger.info(f"State hours complete: {len(state_hours_df)} rows")
+        rows_loaded = load_to_sqlserver(
+            state_hours_df,
+            config,
+            'STATE_HOURS_SQLSERVER_OUTPUT',
+            if_exists='append'
+        )
+        logger.info(f"State hours: {rows_loaded} rows loaded to SQL Server")
     
-    # Add state category for each state
-    state_detail['state_category'] = state_detail['state_name'].apply(self.classify_state)
+    # STEP 1B: Calculate detailed state hours
+    logger.info("STEP 1B: Calculating detailed state hours")
+    calculator = StateHoursCalculator(config)
+    state_hours_detail_df = calculator.aggregate_by_state(entity_states_df)
     
-    # Add calculation timestamp
-    state_detail['calculation_timestamp'] = datetime.now()
+    if not state_hours_detail_df.empty:
+        logger.info(f"State hours detail complete: {len(state_hours_detail_df)} rows")
+        rows_loaded = load_to_sqlserver(
+            state_hours_detail_df,
+            config,
+            'STATE_HOURS_DETAIL_SQLSERVER_OUTPUT',
+            if_exists='append'
+        )
+        logger.info(f"State hours detail: {rows_loaded} rows loaded")
     
-    # CRITICAL: Remove any remaining duplicates (in case of data quality issues)
-    before_dedup = len(state_detail)
-    state_detail = state_detail.drop_duplicates(subset=['ENTITY', 'state_date', 'state_name'], keep='first')
-    after_dedup = len(state_detail)
+    # STEP 2: Calculate wafer production
+    logger.info("STEP 2: Calculating wafer production")
+    production_df = calculate_wafer_production(config, counters_df, state_hours_df)
     
-    if before_dedup > after_dedup:
-        logger.warning(f"Removed {before_dedup - after_dedup} duplicate state_hours_detail rows after aggregation")
+    if not production_df.empty:
+        logger.info(f"Wafer production complete: {len(production_df)} rows")
+        rows_loaded = load_to_sqlserver(
+            production_df,
+            config,
+            'WAFER_PRODUCTION_SQLSERVER_OUTPUT',
+            if_exists='append'
+        )
+        logger.info(f"Wafer production: {rows_loaded} rows loaded")
     
-    logger.info(f"Detailed state tracking: {len(state_detail)} entity-date-state combinations")
-    logger.info(f"Unique states found: {state_detail['state_name'].nunique()}")
+    # STEP 3: Track part replacements
+    logger.info("STEP 3: Tracking part replacements")
+    replacements_df = track_part_replacements(config, production_df)
     
-    unique_states = state_detail['state_name'].unique()
-    logger.info(f"State breakdown: {', '.join(unique_states[:20])}")
+    if not replacements_df.empty:
+        logger.info(f"Part replacements tracked: {len(replacements_df)} events")
+        rows_loaded = load_to_sqlserver(
+            replacements_df,
+            config,
+            'PART_REPLACEMENTS_SQLSERVER_OUTPUT',
+            if_exists='append'
+        )
+        logger.info(f"Part replacements: {rows_loaded} rows loaded")
+    else:
+        logger.info("No part replacements detected")
     
-    return state_detail
+    logger.info("SILVER LAYER COMPLETE")
+    
+    return state_hours_df, production_df, replacements_df
