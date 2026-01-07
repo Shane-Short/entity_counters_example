@@ -1,25 +1,28 @@
-# CRITICAL: Remove any remaining duplicates (in case of data quality issues)
-    before_dedup = len(state_detail)
-    state_detail = state_detail.drop_duplicates(subset=['ENTITY', 'state_date', 'state_name'], keep='first')
-    after_dedup = len(state_detail)
+# STEP 1B: Calculate detailed state hours
+    logger.info("STEP 1B: Calculating detailed state hours")
+    calculator = StateHoursCalculator(config)
+    state_hours_detail_df = calculator.aggregate_by_state(entity_states_df)
     
-    if before_dedup > after_dedup:
-        logger.warning(f"Removed {before_dedup - after_dedup} duplicate state_hours_detail rows after aggregation")
+    # CRITICAL: Validate no duplicates exist before attempting insert
+    duplicate_check = state_hours_detail_df.groupby(['ENTITY', 'state_date', 'state_name']).size()
+    duplicates = duplicate_check[duplicate_check > 1]
     
-    # DEBUG: Check for any remaining duplicates
-    duplicate_check = state_detail.groupby(['ENTITY', 'state_date', 'state_name']).size()
-    if (duplicate_check > 1).any():
-        logger.error("DUPLICATES STILL EXIST AFTER drop_duplicates!")
-        dupes = duplicate_check[duplicate_check > 1]
-        logger.error(f"Found {len(dupes)} duplicate combinations:")
-        logger.error(f"{dupes.head(10)}")
+    if len(duplicates) > 0:
+        logger.error("=" * 80)
+        logger.error("DUPLICATE KEYS DETECTED IN STATE_HOURS_DETAIL!")
+        logger.error("=" * 80)
+        logger.error(f"Found {len(duplicates)} duplicate entity-date-state combinations:")
+        logger.error(f"\n{duplicates.head(20)}")
+        logger.error("=" * 80)
+        logger.error("Stopping pipeline - fix duplicates before loading")
+        raise ValueError(f"Cannot load state_hours_detail: {len(duplicates)} duplicate keys exist")
     
-    logger.info(f"Detailed state tracking: {len(state_detail)} entity-date-state combinations")
-    logger.info(f"Unique states found: {state_detail['state_name'].nunique()}")
-    
-    unique_states = state_detail['state_name'].unique()
-    logger.info(f"State breakdown: {', '.join(unique_states[:20])}")
-    
-    return state_detail
-
-
+    if not state_hours_detail_df.empty:
+        logger.info(f"State hours detail complete: {len(state_hours_detail_df)} rows")
+        rows_loaded = load_to_sqlserver(
+            state_hours_detail_df,
+            config,
+            'STATE_HOURS_DETAIL_SQLSERVER_OUTPUT',
+            if_exists='append'
+        )
+        logger.info(f"State hours detail: {rows_loaded} rows loaded")
