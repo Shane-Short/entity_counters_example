@@ -1,34 +1,112 @@
-# STEP 3: Track part replacements
-    logger.info("STEP 3: Tracking part replacements")
-    replacements_df = track_part_replacements(config, production_df)
+"""
+Silver Layer - Part Replacement Tracking
+========================================
+Tracks all part replacement events detected during wafer production calculation.
+
+Features:
+- Extracts replacement events from wafer production results
+- Records replacement date, counter, and values
+- Tracks part lifecycle metrics
+- Deduplication of replacement events
+"""
+
+import pandas as pd
+import numpy as np
+import logging
+from typing import Dict
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+class PartReplacementTracker:
+    """
+    Tracks part replacement events from wafer production data.
+    """
     
-    # Initialize as empty DataFrame in case of issues
-    if replacements_df is None:
-        replacements_df = pd.DataFrame()
+    def __init__(self, config: Dict):
+        """
+        Initialize part replacement tracker.
+        
+        Parameters
+        ----------
+        config : dict
+            Configuration dictionary
+        """
+        self.config = config
+        self.replacement_config = config['wafer_production']['part_replacement']
+        
+        logger.info("Part Replacement Tracker initialized")
     
-    if not replacements_df.empty:
-        logger.info(f"Part replacements tracked: {len(replacements_df)} events")
+    def extract_replacements(self, production_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Extract part replacement events from production data.
         
-        # FIX: Convert replacement_date to proper date format (remove timezone, ensure DATE not DATETIME)
-        if 'replacement_date' in replacements_df.columns:
-            replacements_df['replacement_date'] = pd.to_datetime(replacements_df['replacement_date']).dt.date
+        Parameters
+        ----------
+        production_df : pd.DataFrame
+            Wafer production data with part_replacement_detected column
         
-        # FIX: Convert replacement_detected_ts to timezone-naive datetime
-        if 'replacement_detected_ts' in replacements_df.columns:
-            replacements_df['replacement_detected_ts'] = pd.to_datetime(replacements_df['replacement_detected_ts'])
-            if replacements_df['replacement_detected_ts'].dt.tz is not None:
-                replacements_df['replacement_detected_ts'] = replacements_df['replacement_detected_ts'].dt.tz_localize(None)
+        Returns
+        -------
+        pd.DataFrame
+            Part replacement events
+        """
+        logger.info("Extracting part replacement events")
         
-        # DEBUG: Check data types AFTER conversion
-        logger.info("Part replacements DataFrame dtypes (after conversion):")
-        logger.info(f"\n{replacements_df.dtypes}")
+        # Filter to rows where replacement was detected
+        replacements = production_df[production_df['part_replacement_detected'] == True].copy()
         
-        rows_loaded = load_to_sqlserver(
-            replacements_df,
-            config,
-            'PART_REPLACEMENTS_SQLSERVER_OUTPUT',
-            if_exists='append'
+        if len(replacements) == 0:
+            logger.info("No part replacements detected")
+            return pd.DataFrame()
+        
+        # Create replacement tracking table with FAB and FAB_ENTITY
+        replacement_events = pd.DataFrame({
+            'FAB': replacements['FAB'],
+            'ENTITY': replacements['ENTITY'],
+            'FAB_ENTITY': replacements['FAB_ENTITY'],
+            'replacement_date': replacements['counter_date'],
+            'part_counter_name': replacements['counter_column_used'],
+            'last_value_before_replacement': replacements['counter_previous_value'],
+            'first_value_after_replacement': replacements['counter_current_value'],
+            'value_drop': replacements['counter_previous_value'] - replacements['counter_current_value'],
+            'part_wafers_at_replacement': replacements['counter_previous_value'],
+            'notes': replacements['calculation_notes'],
+            'replacement_detected_ts': datetime.now()
+        })
+        
+        # Remove duplicates (same FAB_ENTITY + date + part)
+        before_dedup = len(replacement_events)
+        replacement_events = replacement_events.drop_duplicates(
+            subset=['FAB_ENTITY', 'replacement_date', 'part_counter_name'],
+            keep='last'
         )
-        logger.info(f"Part replacements: {rows_loaded} rows loaded")
-    else:
-        logger.info("No part replacements detected")
+        after_dedup = len(replacement_events)
+        
+        if before_dedup > after_dedup:
+            logger.info(f"Removed {before_dedup - after_dedup} duplicate replacement events")
+        
+        logger.info(f"Part replacement tracking complete: {len(replacement_events)} replacement events")
+        
+        return replacement_events
+
+
+def track_part_replacements(config: Dict, production_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Standalone function to track part replacements.
+    
+    Parameters
+    ----------
+    config : dict
+        Configuration dictionary
+    production_df : pd.DataFrame
+        Wafer production data
+    
+    Returns
+    -------
+    pd.DataFrame
+        Part replacement events
+    """
+    tracker = PartReplacementTracker(config)
+    return tracker.extract_replacements(production_df)
