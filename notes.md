@@ -1,57 +1,39 @@
-def get_database_connection(config: Dict, environment: str = None) -> pyodbc.Connection:
+def aggregate_by_state(self, df: pd.DataFrame) -> pd.DataFrame:
     """
-    Get generic database connection without table-specific information.
-    Uses environment specified in runtime.runtime_env if not provided.
-    
-    Parameters
-    ----------
-    config : dict
-        Configuration dictionary
-    environment : str, optional
-        Environment name. If None, uses config['runtime']['runtime_env']
-    
-    Returns
-    -------
-    pyodbc.Connection
-        Database connection
+    Aggregate hours by entity, date, and individual state.
     """
-    import os
-    from dotenv import load_dotenv
+    # Extract date from DAY_SHIFT (format: "12/31 - S7")
+    date_str = df['DAY_SHIFT'].str.split(' - ').str[0]
     
-    load_dotenv()
+    # Add year from load_date column
+    year = pd.to_datetime(df['load_date']).dt.year
+    df['state_date'] = pd.to_datetime(year.astype(str) + '/' + date_str).dt.date
     
-    # Get environment
-    if environment is None:
-        environment = config['runtime']['runtime_env']
+    # Group by ENTITY, state_date, and actual ENTITY_STATE - SUM to combine duplicates
+    state_detail = df.groupby(['ENTITY', 'FAB', 'state_date', 'ENTITY_STATE'], as_index=False).agg({
+        'HOURS_IN_STATE': 'sum'
+    })
     
-    # Get environment config
-    env_config = config['environments'][environment]['sqlserver']
+    state_detail = state_detail.rename(columns={'HOURS_IN_STATE': 'hours', 'ENTITY_STATE': 'state_name'})
     
-    # Get values with environment variable substitution
-    server = os.getenv('SQL_SERVER', env_config.get('server', ''))
-    port = os.getenv('SQL_PORT', env_config.get('port', '1433'))
-    username = os.getenv('SQL_USERNAME', env_config.get('username', ''))
-    password = os.getenv('SQL_PASSWORD', env_config.get('password', ''))
-    driver = env_config.get('driver', 'ODBC Driver 18 for SQL Server')
-    database = env_config['database']
+    # Add state category for each state
+    state_detail['state_category'] = state_detail['state_name'].apply(self.classify_state)
     
-    # Build server string (no tcp: prefix for instance names)
-    if '\\' in server:
-        server_str = server  # Instance name format
-    elif ',' in server:
-        server_str = server  # Port already specified
-    else:
-        server_str = f"{server},{port}" if port else server
+    # Add calculation timestamp
+    state_detail['calculation_timestamp'] = datetime.now()
     
-    # Build connection string
-    conn_str = (
-        f"DRIVER={{{driver}}};"
-        f"SERVER={server_str};"
-        f"DATABASE={database};"
-        f"UID={username};"
-        f"PWD={password};"
-        f"TrustServerCertificate=yes;"
-    )
+    # CRITICAL: Remove any remaining duplicates (in case of data quality issues)
+    before_dedup = len(state_detail)
+    state_detail = state_detail.drop_duplicates(subset=['ENTITY', 'state_date', 'state_name'], keep='first')
+    after_dedup = len(state_detail)
     
-    logger.debug(f"Connecting to {server_str}/{database}")
-    return pyodbc.connect(conn_str, timeout=30)
+    if before_dedup > after_dedup:
+        logger.warning(f"Removed {before_dedup - after_dedup} duplicate state_hours_detail rows after aggregation")
+    
+    logger.info(f"Detailed state tracking: {len(state_detail)} entity-date-state combinations")
+    logger.info(f"Unique states found: {state_detail['state_name'].nunique()}")
+    
+    unique_states = state_detail['state_name'].unique()
+    logger.info(f"State breakdown: {', '.join(unique_states[:20])}")
+    
+    return state_detail
