@@ -46,5 +46,73 @@ def calculate_for_dataframe(self, counters_df: pd.DataFrame, state_hours_df: pd.
                     logger.info(f"Incremental mode: Filtered out {before_filter - after_filter} existing records, processing {after_filter} new records")
             except Exception as e:
                 logger.warning(f"Could not check existing production data: {e}. Processing all records.")
+
+
+
+
+
+def detect_all_part_replacements(
+        self,
+        current_row: pd.Series,
+        previous_row: pd.Series,
+        entity: str,
+        date: str
+    ) -> List[Dict]:
+        """
+        Check ALL counter columns for part replacements.
+        
+        Returns list of replacement events (one per counter that dropped).
+        """
+        replacements = []
+        
+        # Get all counter columns
+        counter_cols = [col for col in current_row.index if col.endswith('Counter')]
+        
+        for counter_col in counter_cols:
+            current_val = current_row.get(counter_col)
+            previous_val = previous_row.get(counter_col) if previous_row is not None else None
+            
+            # Skip if either value is missing
+            if pd.isna(current_val) or pd.isna(previous_val):
+                continue
+            
+            # Skip if values are too low (not actively used)
+            if current_val < 100 or previous_val < 100:
+                continue
+            
+            change = current_val - previous_val
+            
+            # Check for replacement (threshold: -10)
+            if change < self.replacement_threshold:
+                replacements.append({
+                    'counter_name': counter_col,
+                    'previous_value': previous_val,
+                    'current_value': current_val,
+                    'change': change
+                })
+                
+                logger.info(f"PART REPLACEMENT - {entity} ({date}): {counter_col} dropped {change} (from {previous_val} to {current_val})")
+        
+        return replacements
+
+
+
+
+
+
+
+# After calculating wafer production...
+        
+        # Check for part replacements in ALL counters
+        if previous_row is not None:
+            all_replacements = self.detect_all_part_replacements(current_row, previous_row, entity, date)
+            
+            if all_replacements:
+                result['part_replacement_detected'] = True
+                result['part_replacements_detail'] = all_replacements  # Store all detected replacements
+                result['calculation_notes'].append(f"{len(all_replacements)} part replacement(s) detected")
+            else:
+                result['part_replacement_detected'] = False
+                result['part_replacements_detail'] = []
         
         # Rest of existing code...
