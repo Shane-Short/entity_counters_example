@@ -1,207 +1,3 @@
-def calculate_for_dataframe(
-    self,
-    counters_df: pd.DataFrame,
-    state_hours_df: pd.DataFrame,
-    mode: str = 'full'
-) -> pd.DataFrame:
-    """
-    Calculate wafer production for entire DataFrame.
-
-    Parameters
-    ----------
-    counters_df : pd.DataFrame
-        Counters data (from Bronze)
-    state_hours_df : pd.DataFrame
-        State hours data (running hours by entity-date)
-    mode : str
-        'full' = process all dates, 'incremental' = only process new dates
-
-    Returns
-    -------
-    pd.DataFrame
-        Daily production metrics
-    """
-    logger.info(f"Starting wafer production calculation (mode: {mode})")
-
-    # INCREMENTAL MODE: Filter to only new dates not already in database
-    if mode == 'incremental':
-        from utils.database_engine import get_database_connection
-        
-        try:
-            logger.info("Incremental mode: Checking for existing production data")
-            conn = get_database_connection(self.config)
-            existing_dates_query = """
-                SELECT DISTINCT FAB_ENTITY, counter_date 
-                FROM dbo.wafer_production
-            """
-            existing_df = pd.read_sql(existing_dates_query, conn)
-            conn.close()
-            
-            if not existing_df.empty:
-                # Create a set of (FAB_ENTITY, counter_date) tuples that already exist
-                existing_keys = set(zip(existing_df['FAB_ENTITY'], existing_df['counter_date']))
-                
-                # Filter counters_df to only new records
-                before_filter = len(counters_df)
-                counters_df = counters_df[
-                    ~counters_df.apply(lambda row: (row['FAB_ENTITY'], row['counter_date']) in existing_keys, axis=1)
-                ].reset_index(drop=True)
-                after_filter = len(counters_df)
-                
-                logger.info(f"Incremental mode: Filtered out {before_filter - after_filter} existing records, processing {after_filter} new records")
-            else:
-                logger.info("Incremental mode: No existing data found, processing all records")
-        except Exception as e:
-            logger.warning(f"Could not check existing production data: {e}. Processing all records.")
-
-    # Filter out excluded entities (e.g., loadports)
-    if self.exclude_patterns:
-        initial_count = len(counters_df)
-        excluded_entities = counters_df["ENTITY"].apply(self.is_entity_excluded)
-        excluded_count = excluded_entities.sum()
-
-        if excluded_count > 0:
-            excluded_list = (
-                counters_df[excluded_entities]["ENTITY"]
-                .unique()
-                .tolist()
-            )
-            logger.info(
-                f"Excluding {excluded_count} rows from "
-                f"{len(excluded_list)} entities matching exclude patterns"
-            )
-            logger.info(f"Sample excluded entities: {excluded_list[:5]}")
-            counters_df = (
-                counters_df[~excluded_entities]
-                .reset_index(drop=True)
-            )
-            logger.info(
-                f"Remaining entities for wafer production: "
-                f"{len(counters_df)}"
-            )
-
-    # Sort by entity and date
-    counters_df = (
-        counters_df
-        .sort_values(["ENTITY", "counter_date"])
-        .reset_index(drop=True)
-    )
-
-    results = []
-
-    # Group by FAB_ENTITY
-    for fab_entity, entity_group in counters_df.groupby("FAB_ENTITY"):
-        entity = entity_group.iloc[0]["ENTITY"]
-        entity_group = (
-            entity_group
-            .sort_values("counter_date")
-            .reset_index(drop=True)
-        )
-
-        # Skip if only 1 day of data - can't calculate production without previous day
-        if len(entity_group) == 1:
-            logger.debug(
-                f"Skipping {entity}: only 1 day of data, "
-                "no previous comparison possible"
-            )
-
-            # Still create a result row but with no wafer calculation
-            result = {
-                "FAB": entity_group.iloc[0].get("FAB", ""),
-                "ENTITY": entity,
-                "FAB_ENTITY": entity_group.iloc[0].get("FAB_ENTITY", ""),
-                "counter_date": entity_group.iloc[0]["counter_date"],
-                "counter_column_used": None,
-                "counter_keyword_used": None,
-                "counter_current_value": None,
-                "counter_previous_value": None,
-                "counter_change": None,
-                "part_replacement_detected": False,
-                "wafers_produced": None,
-                "running_hours": 0,
-                "wafers_per_hour": None,
-                "calculation_notes": [
-                    "Only 1 day of data - no previous comparison"
-                ],
-            }
-            results.append(result)
-            continue
-
-        # Process each day
-        for idx, current_row in entity_group.iterrows():
-            # Get previous row (only within same entity)
-            previous_row = (
-                entity_group.iloc[idx - 1] if idx > 0 else None
-            )
-
-            if previous_row is None:
-                logger.debug(
-                    f"{entity} on {current_row['counter_date']}: "
-                    "First day, no previous row"
-                )
-
-            # Get running hours for this day
-            date = current_row["counter_date"]
-            running_hours_row = state_hours_df[
-                (state_hours_df["ENTITY"] == entity)
-                & (state_hours_df["state_date"] == date)
-            ]
-
-            running_hours = (
-                running_hours_row["running_hours"].values[0]
-                if len(running_hours_row) > 0
-                else 0
-            )
-
-            # Calculate production
-            result = self.calculate_wafer_production_single_row(
-                current_row,
-                previous_row,
-                running_hours,
-            )
-            results.append(result)
-
-    # Convert to DataFrame
-    production_df = pd.DataFrame(results)
-
-    # Convert notes list to string
-    production_df["calculation_notes"] = (
-        production_df["calculation_notes"]
-        .apply(lambda x: " | ".join(x) if x else None)
-    )
-
-    # Remove duplicates based on FAB_ENTITY and counter_date
-    before_dedup = len(production_df)
-    production_df = production_df.drop_duplicates(
-        subset=["FAB_ENTITY", "counter_date"],
-        keep="last",
-    )
-    after_dedup = len(production_df)
-
-    if before_dedup > after_dedup:
-        logger.info(
-            f"Removed {before_dedup - after_dedup} duplicate rows"
-        )
-
-    logger.info(
-        f"Wafer production calculation complete: "
-        f"{len(production_df)} rows"
-    )
-    logger.info(
-        f"Rows with wafers calculated: "
-        f"{production_df['wafers_produced'].notna().sum()}"
-    )
-    logger.info(
-        f"Part replacements detected: "
-        f"{production_df['part_replacement_detected'].sum()}"
-    )
-
-    return production_df
-
-
-
-
-
 def detect_all_part_replacements(
         self,
         current_row: pd.Series,
@@ -213,6 +9,22 @@ def detect_all_part_replacements(
         Check ALL counter columns for part replacements.
         
         Returns list of replacement events (one per counter that dropped).
+        
+        Parameters
+        ----------
+        current_row : pd.Series
+            Current day row
+        previous_row : pd.Series
+            Previous day row
+        entity : str
+            Entity name
+        date : str
+            Counter date
+        
+        Returns
+        -------
+        List[Dict]
+            List of replacement dictionaries, one per counter that dropped
         """
         replacements = []
         
@@ -221,7 +33,7 @@ def detect_all_part_replacements(
         
         for counter_col in counter_cols:
             current_val = current_row.get(counter_col)
-            previous_val = previous_row.get(counter_col) if previous_row is not None else None
+            previous_val = previous_row.get(counter_col)
             
             # Skip if either value is missing
             if pd.isna(current_val) or pd.isna(previous_val):
@@ -233,7 +45,7 @@ def detect_all_part_replacements(
             
             change = current_val - previous_val
             
-            # Check for replacement (threshold: -10)
+            # Check for replacement (threshold from config)
             if change < self.replacement_threshold:
                 replacements.append({
                     'counter_name': counter_col,
@@ -242,7 +54,10 @@ def detect_all_part_replacements(
                     'change': change
                 })
                 
-                logger.info(f"PART REPLACEMENT - {entity} ({date}): {counter_col} dropped {change} (from {previous_val} to {current_val})")
+                logger.info(
+                    f"PART REPLACEMENT - {entity} ({date}): {counter_col} "
+                    f"dropped {change} (from {previous_val} to {current_val})"
+                )
         
         return replacements
 
@@ -252,18 +67,137 @@ def detect_all_part_replacements(
 
 
 
-# After calculating wafer production...
-        
-        # Check for part replacements in ALL counters
+
+# STEP 5: Calculate wafers produced and wafers per hour
+        if result["counter_change"] is not None and result["counter_change"] >= 0:
+            result["wafers_produced"] = result["counter_change"]
+
+            if running_hours > 0:
+                result["wafers_per_hour"] = (
+                    result["wafers_produced"] / running_hours
+                )
+            else:
+                result["calculation_notes"].append(
+                    "No running hours - cannot calculate wafers/hour"
+                )
+
+        # STEP 6: Check ALL counters for part replacements (not just the one used for wafer calc)
         if previous_row is not None:
-            all_replacements = self.detect_all_part_replacements(current_row, previous_row, entity, date)
+            all_replacements = self.detect_all_part_replacements(
+                current_row, previous_row, entity, date
+            )
             
             if all_replacements:
                 result['part_replacement_detected'] = True
-                result['part_replacements_detail'] = all_replacements  # Store all detected replacements
-                result['calculation_notes'].append(f"{len(all_replacements)} part replacement(s) detected")
+                result['all_part_replacements'] = all_replacements  # Store list of all replacements
+                result['calculation_notes'].append(
+                    f"{len(all_replacements)} part replacement(s) detected across all counters"
+                )
             else:
                 result['part_replacement_detected'] = False
-                result['part_replacements_detail'] = []
+                result['all_part_replacements'] = []
+
+        return result
+
+
+
+
+
+
+
+
+def extract_replacements(
+        self,
+        production_df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        Extract ALL part replacement events from production data.
+        Each counter that dropped gets its own row.
         
-        # Rest of existing code...
+        Parameters
+        ----------
+        production_df : pd.DataFrame
+            Wafer production data with part_replacement_detected and all_part_replacements columns
+        
+        Returns
+        -------
+        pd.DataFrame
+            Part replacement events (one row per counter replaced)
+        """
+        logger.info("Extracting part replacement events")
+        
+        # Filter to rows where replacement was detected
+        replacements = production_df[
+            production_df["part_replacement_detected"] == True
+        ].copy()
+        
+        if len(replacements) == 0:
+            logger.info("No part replacements detected")
+            return pd.DataFrame()
+        
+        # Expand all_part_replacements list into individual rows
+        all_replacement_records = []
+        
+        for _, row in replacements.iterrows():
+            # Get the list of all replacements for this entity-date
+            replacement_list = row.get('all_part_replacements', [])
+            
+            if not replacement_list:
+                # Fallback: if all_part_replacements doesn't exist, use the single counter
+                replacement_list = [{
+                    'counter_name': row['counter_column_used'],
+                    'previous_value': row['counter_previous_value'],
+                    'current_value': row['counter_current_value'],
+                    'change': row['counter_change']
+                }]
+            
+            # Create a separate record for each counter that was replaced
+            for repl in replacement_list:
+                all_replacement_records.append({
+                    'FAB': row['FAB'],
+                    'ENTITY': row['ENTITY'],
+                    'FAB_ENTITY': row['FAB_ENTITY'],
+                    'replacement_date': row['counter_date'],
+                    'part_counter_name': repl['counter_name'],
+                    'last_value_before_replacement': repl['previous_value'],
+                    'first_value_after_replacement': repl['current_value'],
+                    'value_drop': repl['previous_value'] - repl['current_value'],
+                    'part_wafers_at_replacement': repl['previous_value'],
+                    'notes': row.get('calculation_notes', ''),
+                    'replacement_detected_ts': datetime.now()
+                })
+        
+        replacement_events = pd.DataFrame(all_replacement_records)
+        
+        # Remove duplicates (same FAB_ENTITY + date + counter)
+        before_dedup = len(replacement_events)
+        replacement_events = replacement_events.drop_duplicates(
+            subset=[
+                "FAB_ENTITY",
+                "replacement_date",
+                "part_counter_name",
+            ],
+            keep="last",
+        )
+        after_dedup = len(replacement_events)
+        
+        if before_dedup > after_dedup:
+            logger.info(
+                f"Removed {before_dedup - after_dedup} "
+                "duplicate replacement events"
+            )
+        
+        logger.info(
+            f"Part replacement tracking complete: "
+            f"{len(replacement_events)} replacement events"
+        )
+        
+        return replacement_events
+
+
+
+
+
+
+
+
