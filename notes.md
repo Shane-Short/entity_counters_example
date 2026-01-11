@@ -1,83 +1,36 @@
-def extract_replacements(self, production_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Extract ALL part replacement events from production data.
-        Creates one row per counter that was replaced.
-        
-        Parameters
-        ----------
-        production_df : pd.DataFrame
-            Wafer production data with all_part_replacements column
-        
-        Returns
-        -------
-        pd.DataFrame
-            Part replacement events (one row per replaced counter)
-        """
-        logger.info("Extracting part replacement events")
-        
-        # Filter to rows where replacement was detected
-        replacements = production_df[
-            production_df["part_replacement_detected"] == True
-        ].copy()
-        
-        if len(replacements) == 0:
-            logger.info("No part replacements detected")
-            return pd.DataFrame()
-        
-        # Expand all_part_replacements into individual rows
-        all_replacement_records = []
-        
-        for _, row in replacements.iterrows():
-            # Get the list of all replacements for this entity-date
-            replacement_list = row.get('all_part_replacements', [])
+# Get running hours for this day
+            date = current_row["counter_date"]
             
-            # HANDLE CASE WHERE IT'S A STRING (from SQL storage)
-            if isinstance(replacement_list, str):
-                import ast
-                try:
-                    replacement_list = ast.literal_eval(replacement_list)
-                except:
-                    replacement_list = []
+            # DEBUG: Check date types
+            if entity_count == 1:  # Only log for first entity
+                print(f"\nDEBUG running_hours lookup:")
+                print(f"  Looking for FAB_ENTITY={fab_entity}, date={date} (type: {type(date)})")
+                print(f"  state_hours has {len(state_hours_df)} rows")
+                print(f"  state_hours FAB_ENTITY values: {state_hours_df['FAB_ENTITY'].unique()[:5]}")
+                print(f"  state_hours date type: {type(state_hours_df['state_date'].iloc[0])}")
+                print(f"  Sample state_hours dates: {state_hours_df['state_date'].unique()[:5]}")
             
-            # HANDLE EMPTY LIST
-            if not replacement_list:
-                logger.warning(f"part_replacement_detected=True but no replacements in list for {row['FAB_ENTITY']} on {row['counter_date']}")
-                continue
+            # Match FAB_ENTITY first
+            fab_entity_match = state_hours_df[state_hours_df["FAB_ENTITY"] == fab_entity]
             
-            # CREATE A SEPARATE ROW FOR EACH REPLACED COUNTER
-            for repl in replacement_list:
-                all_replacement_records.append({
-                    'FAB': row['FAB'],
-                    'ENTITY': row['ENTITY'],
-                    'FAB_ENTITY': row['FAB_ENTITY'],
-                    'replacement_date': row['counter_date'],
-                    'previous_counter_date': row.get('previous_counter_date'),  # ADD THIS
-                    'part_counter_name': repl['counter_name'],
-                    'last_value_before_replacement': repl['previous_value'],
-                    'first_value_after_replacement': repl['current_value'],
-                    'value_drop': abs(repl['change']),  # Absolute value of the drop
-                    'part_wafers_at_replacement': repl['previous_value'],
-                    'notes': f"Counter dropped {repl['change']} wafers",
-                    'replacement_detected_ts': datetime.now()
-                })
-        
-        if not all_replacement_records:
-            logger.info("No valid part replacement records created")
-            return pd.DataFrame()
-        
-        replacement_events = pd.DataFrame(all_replacement_records)
-        
-        # Remove duplicates
-        before_dedup = len(replacement_events)
-        replacement_events = replacement_events.drop_duplicates(
-            subset=['FAB_ENTITY', 'replacement_date', 'part_counter_name'],
-            keep='last'
-        )
-        after_dedup = len(replacement_events)
-        
-        if before_dedup > after_dedup:
-            logger.info(f"Removed {before_dedup - after_dedup} duplicate replacement events")
-        
-        logger.info(f"Part replacement tracking complete: {len(replacement_events)} replacement events")
-        
-        return replacement_events
+            if len(fab_entity_match) == 0:
+                if entity_count == 1:
+                    print(f"  WARNING: No state_hours rows for FAB_ENTITY={fab_entity}")
+                running_hours = 0
+            else:
+                # Then match date - try both with and without conversion
+                date_match = fab_entity_match[fab_entity_match["state_date"] == date]
+                
+                if len(date_match) == 0:
+                    # Try converting date
+                    date_as_date = pd.to_datetime(date).date() if not isinstance(date, type(pd.to_datetime('2020-01-01').date())) else date
+                    date_match = fab_entity_match[fab_entity_match["state_date"] == date_as_date]
+                
+                if len(date_match) > 0:
+                    running_hours = date_match["running_hours"].values[0]
+                    if entity_count == 1:
+                        print(f"  SUCCESS: Found running_hours={running_hours}")
+                else:
+                    running_hours = 0
+                    if entity_count == 1:
+                        print(f"  WARNING: No date match. Available dates for this FAB_ENTITY: {fab_entity_match['state_date'].unique()[:5]}")
