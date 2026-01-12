@@ -1,25 +1,27 @@
-# STEP 3: Track part replacements
-    logger.info("STEP 3: Tracking part replacements")
-    print("\nSTEP 3: Starting part replacement tracking...")
-    
-    # DEBUG: Check production_df
-    part_repl_count = production_df['part_replacement_detected'].sum()
-    print(f"  production_df has {len(production_df)} rows")
-    print(f"  {part_repl_count} rows have part_replacement_detected=True")
-    
-    if part_repl_count > 0:
-        sample_row = production_df[production_df['part_replacement_detected'] == True].iloc[0]
-        print(f"  Sample all_part_replacements value: {sample_row['all_part_replacements']}")
-        print(f"  Type: {type(sample_row['all_part_replacements'])}")
-    
-    replacements_df = track_part_replacements(config, production_df)
-    
-    print(f"  Part replacements returned: {len(replacements_df) if replacements_df is not None else 0} rows")
-    
-    if replacements_df is None or replacements_df.empty:
-        logger.warning("No part replacements to load")
-        print("  WARNING: No part replacements extracted!")
-    else:
-        print(f"  ✓ Successfully extracted {len(replacements_df)} part replacement events")
-        # Load to database
-        load_to_sqlserver(replacements_df, config, 'PART_REPLACEMENTS_SQLSERVER_OUTPUT', if_exists='append')
+def parse_day_shift_with_year(self, day_shift: str, year: str) -> pd.Timestamp:
+        """
+        Parse DAY_SHIFT using year from WW column.
+        
+        Parameters
+        ----------
+        day_shift : str
+            Format: "MM/DD-SX" (e.g., "12/13-S6")
+        year : str
+            Year from WW column (e.g., "2025")
+        
+        Returns
+        -------
+        pd.Timestamp
+            Parsed date
+        """
+        try:
+            # Extract MM/DD from DAY_SHIFT (before the " - ")
+            date_part = day_shift.split(" - ")[0] if " - " in day_shift else day_shift.split("-")[0]
+            
+            # Combine with year from WW
+            date_str = f"{year}/{date_part}"
+            
+            return pd.to_datetime(date_str).date()
+        except Exception as e:
+            logger.warning(f"Could not parse day_shift='{day_shift}' with year='{year}': {e}")
+            return None
