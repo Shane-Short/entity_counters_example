@@ -1,17 +1,27 @@
-DECLARE @sql NVARCHAR(MAX) = 'SELECT COUNT(*) AS disconnected_count FROM counters_raw WHERE '
-DECLARE @conditions NVARCHAR(MAX) = ''
+# =========================================================================
+# PRE-PROCESSING: Filter and fix counter data
+# =========================================================================
 
-SELECT @conditions = @conditions + 
-    'AND (' + QUOTENAME(COLUMN_NAME) + ' IS NULL OR ' + QUOTENAME(COLUMN_NAME) + ' BETWEEN -5 AND 5) '
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME = 'counters_raw'
-    AND COLUMN_NAME NOT IN (
-        'counters_raw_id', 'ENTITY', 'FAB', 'FAB_ENTITY', 
-        'source_file', 'load_ww', 'load_ts', 'load_date', 
-        'counter_date', 'file_modified_ts'
-    )
+# Step 1: Exclude non-chamber entities (LP, VTM, LLM have no counter data)
+logger.info("PRE-PROCESSING: Filtering out non-chamber entities (LP, VTM, LLM)")
+print("PRE-PROCESSING: Filtering out non-chamber entities (LP, VTM, LLM)")
 
-SET @conditions = STUFF(@conditions, 1, 4, '')
-SET @sql = @sql + @conditions
+before_filter = len(counters_df)
+counters_df = counters_df[
+    ~counters_df['ENTITY'].str.contains('_LP|_VTM|_LLM', case=False, regex=True)
+].reset_index(drop=True)
+after_filter = len(counters_df)
 
-EXEC sp_executesql @sql
+logger.info(f"Filtered out {before_filter - after_filter} non-chamber rows, {after_filter} rows remaining")
+print(f"Filtered out {before_filter - after_filter} non-chamber rows, {after_filter} rows remaining")
+
+# Step 2: Fix disconnected counter rows
+logger.info("PRE-PROCESSING: Fixing disconnected counter rows")
+print("PRE-PROCESSING: Fixing disconnected counter rows")
+
+counters_df = fix_disconnected_counter_rows(counters_df)
+
+print(f"PRE-PROCESSING COMPLETE - counters_df has {len(counters_df)} rows")
+logger.info("Pre-processing complete")
+print("Pre-processing complete")
+# =========================================================================
