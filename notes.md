@@ -1,15 +1,12 @@
 def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Detects disconnected rows in counter data and forward/back-fills with valid values.
+    Detects and fixes disconnected/zero counter values at the CELL level.
     
-    A row is considered "disconnected" if ALL counter value columns are either:
-    - NULL/NaN, OR
-    - Between -5 and 5 (essentially zero or near-zero noise)
+    For each counter column individually:
+    - If value is NULL or between -5 and 5, forward-fill from previous day
+    - If no previous value exists, backfill from next valid value
     
-    For disconnected rows:
-    - Counter values are forward-filled from the last valid row for that FAB_ENTITY
-    - If no previous valid row exists, values are back-filled from the next valid row
-    - is_disconnected flag is set to True
+    Also flags rows where ALL counter values were invalid (fully disconnected).
     
     Parameters
     ----------
@@ -25,13 +22,13 @@ def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
     import numpy as np
     logger = logging.getLogger(__name__)
     
-    logger.info("Checking for disconnected counter rows...")
-    print("Checking for disconnected counter rows...")
+    logger.info("Starting cell-level counter fix...")
+    print("Starting cell-level counter fix...")
     
     # Make a copy to avoid modifying original
     df = counters_df.copy()
     
-    # Identify metadata columns (non-counter columns to exclude from the check)
+    # Identify metadata columns (non-counter columns to exclude)
     metadata_columns = [
         'FAB', 'ENTITY', 'FAB_ENTITY', 'DATE', 'Date', 'date', 'counter_date',
         'YEARWW', 'YearWW', 'yearww', 'FACILITY', 'Facility',
@@ -47,36 +44,8 @@ def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
         if col not in metadata_columns and col.upper() not in metadata_upper
     ]
     
-    logger.info(f"Found {len(counter_columns)} counter columns to check")
-    print(f"Found {len(counter_columns)} counter columns to check")
-    
-    # Create a subset with only counter columns for checking
-    counter_data = df[counter_columns]
-    
-    logger.info("Converting counter columns to numeric...")
-    print("Converting counter columns to numeric...")
-    
-    # Convert to numeric, coercing errors to NaN (handles string columns)
-    counter_numeric = counter_data.apply(pd.to_numeric, errors='coerce')
-    
-    logger.info("Identifying valid vs disconnected values...")
-    print("Identifying valid vs disconnected values...")
-    
-    # VECTORIZED: Check if each value is "invalid" (NULL or between -5 and 5)
-    # A value is "valid" if it's not null AND outside the -5 to 5 range
-    is_valid_value = counter_numeric.notna() & ((counter_numeric < -5) | (counter_numeric > 5))
-    
-    # Row is disconnected if NO columns have a valid value (all False in that row)
-    df['is_disconnected'] = ~is_valid_value.any(axis=1)
-    
-    disconnected_count = df['is_disconnected'].sum()
-    logger.info(f"Found {disconnected_count} disconnected rows out of {len(df)} total")
-    print(f"Found {disconnected_count} disconnected rows out of {len(df)} total")
-    
-    if disconnected_count == 0:
-        logger.info("No disconnected rows to fix")
-        print("No disconnected rows to fix")
-        return df
+    logger.info(f"Found {len(counter_columns)} counter columns to process")
+    print(f"Found {len(counter_columns)} counter columns to process")
     
     # Find date column
     date_col = None
@@ -86,8 +55,6 @@ def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
             break
     
     if date_col is None:
-        logger.error("Could not find date column in counters data")
-        print("ERROR: Could not find date column in counters data")
         raise ValueError("Date column not found in counters_df")
     
     # Find FAB_ENTITY column
@@ -98,8 +65,6 @@ def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
             break
     
     if fab_entity_col is None:
-        logger.error("Could not find FAB_ENTITY column in counters data")
-        print("ERROR: Could not find FAB_ENTITY column in counters data")
         raise ValueError("FAB_ENTITY column not found in counters_df")
     
     logger.info(f"Using '{fab_entity_col}' for entity grouping and '{date_col}' for date sorting")
@@ -110,64 +75,68 @@ def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
     print("Sorting data by FAB_ENTITY and date...")
     df = df.sort_values([fab_entity_col, date_col]).reset_index(drop=True)
     
-    # Store original is_disconnected flags (before any modification)
-    disconnected_flags = df['is_disconnected'].copy()
+    # Track which cells were fixed for reporting
+    total_cells_fixed = 0
     
     # =========================================================================
-    # FORWARD-FILL: Fill disconnected rows with last valid values
+    # CELL-LEVEL FORWARD-FILL AND BACKFILL
     # =========================================================================
-    logger.info("Forward-filling disconnected rows with last valid values...")
-    print("Forward-filling disconnected rows with last valid values...")
+    logger.info("Processing counter columns (cell-level forward/back-fill)...")
+    print("Processing counter columns (cell-level forward/back-fill)...")
     
     total_cols = len(counter_columns)
     for i, col in enumerate(counter_columns):
         if (i + 1) % 50 == 0 or (i + 1) == total_cols:
-            logger.info(f"Forward-filling column {i + 1}/{total_cols}")
-            print(f"Forward-filling column {i + 1}/{total_cols}")
+            logger.info(f"Processing column {i + 1}/{total_cols}: {col}")
+            print(f"Processing column {i + 1}/{total_cols}: {col}")
         
-        # Create a series where disconnected rows are NaN
-        values_to_fill = df[col].copy()
-        values_to_fill[disconnected_flags] = np.nan
+        # Convert to numeric
+        numeric_values = pd.to_numeric(df[col], errors='coerce')
         
-        # Forward-fill within each FAB_ENTITY group
-        df[col] = values_to_fill.groupby(df[fab_entity_col]).ffill()
-    
-    logger.info("Forward-fill complete.")
-    print("Forward-fill complete.")
-    
-    # =========================================================================
-    # BACKFILL: Handle cases where disconnected rows are at the START of data
-    # (no previous valid row to forward-fill from)
-    # =========================================================================
-    logger.info("Backfilling any remaining disconnected rows (start-of-data gaps)...")
-    print("Backfilling any remaining disconnected rows (start-of-data gaps)...")
-    
-    backfill_needed = False
-    for i, col in enumerate(counter_columns):
-        # Check if any disconnected rows still have NaN after forward-fill
-        still_nan = df[col].isna() & disconnected_flags
-        if still_nan.any():
-            if not backfill_needed:
-                backfill_needed = True
-                logger.info("Found rows needing backfill, processing...")
-                print("Found rows needing backfill, processing...")
+        # Identify cells that need fixing: NULL or between -5 and 5
+        needs_fix = numeric_values.isna() | ((numeric_values >= -5) & (numeric_values <= 5))
+        
+        cells_to_fix = needs_fix.sum()
+        if cells_to_fix > 0:
+            total_cells_fixed += cells_to_fix
             
-            # Backfill within each FAB_ENTITY group
-            df[col] = df[col].groupby(df[fab_entity_col]).bfill()
+            # Replace bad values with NaN for filling
+            fixed_values = numeric_values.copy()
+            fixed_values[needs_fix] = np.nan
+            
+            # Forward-fill within each FAB_ENTITY group
+            fixed_values = fixed_values.groupby(df[fab_entity_col]).ffill()
+            
+            # Backfill any remaining NaN (for first days with no previous value)
+            fixed_values = fixed_values.groupby(df[fab_entity_col]).bfill()
+            
+            # Update the column
+            df[col] = fixed_values
     
-    if backfill_needed:
-        # Count how many were backfilled
-        backfilled_entities = df[disconnected_flags].groupby(fab_entity_col).size()
-        logger.info(f"Backfill complete. Affected {len(backfilled_entities)} entities.")
-        print(f"Backfill complete. Affected {len(backfilled_entities)} entities.")
-    else:
-        logger.info("No backfill needed - all disconnected rows were forward-filled.")
-        print("No backfill needed - all disconnected rows were forward-filled.")
+    logger.info(f"Cell-level fix complete. Fixed {total_cells_fixed} cells across all columns.")
+    print(f"Cell-level fix complete. Fixed {total_cells_fixed} cells across all columns.")
     
-    # Restore the is_disconnected flag
-    df['is_disconnected'] = disconnected_flags
+    # =========================================================================
+    # FLAG FULLY DISCONNECTED ROWS (all counters were invalid)
+    # =========================================================================
+    logger.info("Identifying fully disconnected rows...")
+    print("Identifying fully disconnected rows...")
     
-    logger.info(f"Disconnected row fix complete. Fixed {disconnected_count} rows.")
-    print(f"Disconnected row fix complete. Fixed {disconnected_count} rows.")
+    # Re-check original data to see which rows had ALL counters invalid
+    counter_data = counters_df[counter_columns]
+    counter_numeric = counter_data.apply(pd.to_numeric, errors='coerce')
+    
+    # A value is "valid" if it's not null AND outside the -5 to 5 range
+    is_valid_value = counter_numeric.notna() & ((counter_numeric < -5) | (counter_numeric > 5))
+    
+    # Row is fully disconnected if NO columns had a valid value
+    df['is_disconnected'] = ~is_valid_value.any(axis=1)
+    
+    disconnected_count = df['is_disconnected'].sum()
+    logger.info(f"Fully disconnected rows: {disconnected_count} out of {len(df)} total")
+    print(f"Fully disconnected rows: {disconnected_count} out of {len(df)} total")
+    
+    logger.info("Counter fix complete.")
+    print("Counter fix complete.")
     
     return df
