@@ -1,244 +1,141 @@
-def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
+# STEP 1: Find counter column using multi-pass approach
+    # PASS 1: Look for counter > 1000 (normal operation)
+    counter_found = self.find_counter_column(current_row)
+
+    if not counter_found:
+        # PASS 2: Look for counter > 100 (lower threshold)
+        counter_found = self.find_counter_column_with_threshold(current_row, threshold=100)
+        
+        if counter_found:
+            result['calculation_notes'].append('Used lower threshold (>100) to find counter')
+    
+    if not counter_found:
+        # PASS 3: Look for first column with any numeric value (including 0.00)
+        counter_found = self.find_first_numeric_counter(current_row)
+        
+        if counter_found:
+            result['calculation_notes'].append('All counters at zero - using first available')
+    
+    if not counter_found:
+        result['calculation_notes'].append('No valid counter column found')
+        return result
+
+    counter_col, current_val, _ = counter_found
+
+
+
+
+
+
+def find_counter_column_with_threshold(
+    self,
+    row: pd.Series,
+    threshold: float = 100
+) -> Optional[Tuple[str, float, str]]:
     """
-    Detects and fixes disconnected/zero counter values at the CELL level.
-    
-    For each counter column individually:
-    - If value is NULL or between -5 and 5, forward-fill from previous day
-    - If no previous value exists, backfill from next valid value
-    
-    Also flags rows where ALL counter values were invalid (fully disconnected).
+    Find first counter column with value above specified threshold.
     
     Parameters
     ----------
-    counters_df : pd.DataFrame
-        Raw counters data from Bronze layer
+    row : pd.Series
+        Row of counter data
+    threshold : float
+        Minimum value to consider valid
         
     Returns
     -------
-    pd.DataFrame
-        Cleaned counters data with is_disconnected flag added
+    Tuple[str, float, str] or None
+        (column_name, value, keyword) or None if not found
     """
-    import logging
-    import numpy as np
-    logger = logging.getLogger(__name__)
-    
-    logger.info("Starting cell-level counter fix...")
-    print("Starting cell-level counter fix...")
-    
-    # Make a copy to avoid modifying original
-    df = counters_df.copy()
-    
-    # Identify metadata columns (non-counter columns to exclude)
-    metadata_columns = [
-        'FAB', 'ENTITY', 'FAB_ENTITY', 'DATE', 'Date', 'date', 'counter_date',
-        'YEARWW', 'YearWW', 'yearww', 'FACILITY', 'Facility',
-        'CEID', 'Ceid', 'TOOLSET', 'Toolset',
-        'counters_raw_id', 'source_file', 'load_ww', 'load_ts', 
-        'load_date', 'file_modified_ts'
+    skip_columns = [
+        'FAB', 'ENTITY', 'FAB_ENTITY', 'counter_date',
+        'source_file', 'load_ww', 'load_ts', 'load_date',
+        'file_modified_ts', 'counters_raw_id', 'is_disconnected'
     ]
     
-    # Get counter columns (all columns except metadata)
-    metadata_upper = [m.upper() for m in metadata_columns]
-    counter_columns = [
-        col for col in df.columns 
-        if col not in metadata_columns and col.upper() not in metadata_upper
+    for col in row.index:
+        if col in skip_columns:
+            continue
+        
+        val = row[col]
+        if pd.notna(val):
+            try:
+                num_val = float(val)
+                if num_val > threshold:
+                    keyword = col.split('_')[0] if '_' in col else col
+                    return (col, num_val, keyword)
+            except (ValueError, TypeError):
+                continue
+    
+    return None
+
+
+def find_first_numeric_counter(
+    self,
+    row: pd.Series
+) -> Optional[Tuple[str, float, str]]:
+    """
+    Find first counter column with any numeric value (including 0.00).
+    Used as fallback when all counters are zero.
+    
+    Parameters
+    ----------
+    row : pd.Series
+        Row of counter data
+        
+    Returns
+    -------
+    Tuple[str, float, str] or None
+        (column_name, value, keyword) or None if not found
+    """
+    skip_columns = [
+        'FAB', 'ENTITY', 'FAB_ENTITY', 'counter_date',
+        'source_file', 'load_ww', 'load_ts', 'load_date',
+        'file_modified_ts', 'counters_raw_id', 'is_disconnected'
     ]
     
-    logger.info(f"Found {len(counter_columns)} counter columns to process")
-    print(f"Found {len(counter_columns)} counter columns to process")
-    
-    # Find date column
-    date_col = None
-    for col in ['counter_date', 'DATE', 'Date', 'date']:
-        if col in df.columns:
-            date_col = col
-            break
-    
-    if date_col is None:
-        raise ValueError("Date column not found in counters_df")
-    
-    # Find FAB_ENTITY column
-    fab_entity_col = None
-    for col in ['FAB_ENTITY', 'Fab_Entity', 'fab_entity']:
-        if col in df.columns:
-            fab_entity_col = col
-            break
-    
-    if fab_entity_col is None:
-        raise ValueError("FAB_ENTITY column not found in counters_df")
-    
-    logger.info(f"Using '{fab_entity_col}' for entity grouping and '{date_col}' for date sorting")
-    print(f"Using '{fab_entity_col}' for entity grouping and '{date_col}' for date sorting")
-    
-    # Sort for proper forward-fill order
-    logger.info("Sorting data by FAB_ENTITY and date...")
-    print("Sorting data by FAB_ENTITY and date...")
-    df = df.sort_values([fab_entity_col, date_col]).reset_index(drop=True)
-    
-    # Track which cells were fixed for reporting
-    total_cells_fixed = 0
-    
-    # =========================================================================
-    # CELL-LEVEL FORWARD-FILL AND BACKFILL
-    # =========================================================================
-    logger.info("Processing counter columns (cell-level forward/back-fill)...")
-    print("Processing counter columns (cell-level forward/back-fill)...")
-    
-    total_cols = len(counter_columns)
-    for i, col in enumerate(counter_columns):
-        if (i + 1) % 50 == 0 or (i + 1) == total_cols:
-            logger.info(f"Processing column {i + 1}/{total_cols}: {col}")
-            print(f"Processing column {i + 1}/{total_cols}: {col}")
+    for col in row.index:
+        if col in skip_columns:
+            continue
         
-        # Convert to numeric
-        numeric_values = pd.to_numeric(df[col], errors='coerce')
-        
-        # Identify cells that need fixing: NULL or between -5 and 5
-        needs_fix = numeric_values.isna() | ((numeric_values >= -5) & (numeric_values <= 5))
-        
-        cells_to_fix = needs_fix.sum()
-        if cells_to_fix > 0:
-            total_cells_fixed += cells_to_fix
-            
-            # Replace bad values with NaN for filling
-            fixed_values = numeric_values.copy()
-            fixed_values[needs_fix] = np.nan
-            
-            # Forward-fill within each FAB_ENTITY group
-            fixed_values = fixed_values.groupby(df[fab_entity_col]).ffill()
-            
-            # Backfill any remaining NaN (for first days with no previous value)
-            fixed_values = fixed_values.groupby(df[fab_entity_col]).bfill()
-            
-            # Update the column
-            df[col] = fixed_values
+        val = row[col]
+        if pd.notna(val):
+            try:
+                num_val = float(val)
+                # Accept any numeric value, including 0.00
+                keyword = col.split('_')[0] if '_' in col else col
+                return (col, num_val, keyword)
+            except (ValueError, TypeError):
+                continue
     
-    logger.info(f"Cell-level fix complete. Fixed {total_cells_fixed} cells across all columns.")
-    print(f"Cell-level fix complete. Fixed {total_cells_fixed} cells across all columns.")
-    
-    # =========================================================================
-    # FLAG FULLY DISCONNECTED ROWS (all counters were invalid)
-    # =========================================================================
-    logger.info("Identifying fully disconnected rows...")
-    print("Identifying fully disconnected rows...")
-    
-    # Re-check original data to see which rows had ALL counters invalid
-    counter_data = counters_df[counter_columns]
-    counter_numeric = counter_data.apply(pd.to_numeric, errors='coerce')
-    
-    # A value is "valid" if it's not null AND outside the -5 to 5 range
-    is_valid_value = counter_numeric.notna() & ((counter_numeric < -5) | (counter_numeric > 5))
-    
-    # Row is fully disconnected if NO columns had a valid value
-    df['is_disconnected'] = ~is_valid_value.any(axis=1)
-    
-    disconnected_count = df['is_disconnected'].sum()
-    logger.info(f"Fully disconnected rows: {disconnected_count} out of {len(df)} total")
-    print(f"Fully disconnected rows: {disconnected_count} out of {len(df)} total")
-    
-    logger.info("Counter fix complete.")
-    print("Counter fix complete.")
-    
-    return df
+    return None
 
 
 
 
 
-
-
-if previous_row is None:
-                logger.debug(
-                    f"{entity} on {current_row['counter_date']}: "
-                    f"First day, no previous row"
-                )
-
-            # Get running hours for this day
-            date = current_row["counter_date"]
-
-            # Match FAB_ENTITY first
-            fab_entity_match = state_hours_df[
-                state_hours_df["FAB_ENTITY"] == fab_entity
-            ]
-
-            if len(fab_entity_match) == 0:
-                if entity_count == 1:
-                    print(
-                        f" WARNING: No state_hours rows for FAB_ENTITY={fab_entity}"
-                    )
-                running_hours = 0
-                is_bagged = False
-            else:
-                # Then match date - try both with and without conversion
-                date_match = fab_entity_match[
-                    fab_entity_match["state_date"] == date
-                ]
-
-                if len(date_match) == 0:
-                    # Try converting date
-                    date_as_date = (
-                        pd.to_datetime(date).date()
-                        if not isinstance(
-                            date,
-                            type(pd.to_datetime("2020-01-01").date()),
-                        )
-                        else date
-                    )
-
-                    date_match = fab_entity_match[
-                        fab_entity_match["state_date"] == date_as_date
-                    ]
-
-                if len(date_match) > 0:
-                    running_hours = date_match["running_hours"].values[0]
-                    is_bagged = (
-                        bool(date_match["is_bagged"].values[0])
-                        if "is_bagged" in date_match.columns
-                        else False
-                    )
-                    if entity_count == 1:
-                        print(
-                            f" SUCCESS: Found running_hours={running_hours}, "
-                            f"is_bagged={is_bagged}"
-                        )
-                else:
-                    running_hours = 0
-                    is_bagged = False
-
-            # =========================================================
+# =========================================================
             # FIRST DAY BASELINE: If no previous row, establish baseline
             # =========================================================
             if previous_row is None:
-                # Find the counter column and value for this entity
-                # (We need to determine what counter is being used)
-                counter_value = None
-                counter_column = None
-                counter_keyword = None
-                
                 # Get is_disconnected flag if it exists
                 is_disconnected = current_row.get("is_disconnected", False)
                 
-                # Search for a valid counter value in this row
-                for col in current_row.index:
-                    if col in ['FAB', 'ENTITY', 'FAB_ENTITY', 'counter_date', 
-                               'source_file', 'load_ww', 'load_ts', 'load_date',
-                               'file_modified_ts', 'counters_raw_id', 'is_disconnected']:
-                        continue
-                    val = current_row[col]
-                    if pd.notna(val):
-                        try:
-                            num_val = float(val)
-                            if num_val > 5:  # Valid counter value
-                                counter_value = num_val
-                                counter_column = col
-                                # Extract keyword if column has underscore
-                                if '_' in col:
-                                    counter_keyword = col.split('_')[0]
-                                else:
-                                    counter_keyword = col
-                                break
-                        except (ValueError, TypeError):
-                            continue
+                # Use same multi-pass approach as calculate_wafer_production_single_row
+                counter_found = self.find_counter_column(current_row)
+                
+                if not counter_found:
+                    counter_found = self.find_counter_column_with_threshold(current_row, threshold=100)
+                
+                if not counter_found:
+                    counter_found = self.find_first_numeric_counter(current_row)
+                
+                if counter_found:
+                    counter_column, counter_value, counter_keyword = counter_found
+                else:
+                    counter_column = None
+                    counter_value = None
+                    counter_keyword = None
                 
                 result = {
                     "FAB": current_row.get("FAB", ""),
@@ -266,21 +163,28 @@ if previous_row is None:
                 continue  # Skip to next row
             # =========================================================
 
-            # Calculate production (for non-first-day rows)
-            result = self.calculate_wafer_production_single_row(
-                current_row,
-                previous_row,
-                running_hours,
-                is_bagged,
-            )
-            
-            # Carry through is_disconnected flag from counters data
-            result["is_disconnected"] = current_row.get("is_disconnected", False)
-
-            results.append(result)
 
 
 
 
 
 
+# Make a copy to avoid modifying original
+df = counters_df.copy()
+
+# =========================================================================
+# DROP PROBLEMATIC COUNTER COLUMNS (known to provide inaccurate data)
+# =========================================================================
+columns_to_drop = [
+    'PayForRFCounter',
+    'DRYETCHLARRMIMMO9ADHOCCtr', 
+    'NumWafersProcessed',
+    'OOCCountSinceLastDown'
+]
+
+existing_cols_to_drop = [col for col in columns_to_drop if col in df.columns]
+if existing_cols_to_drop:
+    logger.info(f"Dropping problematic counter columns: {existing_cols_to_drop}")
+    print(f"Dropping problematic counter columns: {existing_cols_to_drop}")
+    df = df.drop(columns=existing_cols_to_drop)
+# =========================================================================
