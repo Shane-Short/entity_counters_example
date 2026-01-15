@@ -1,27 +1,25 @@
-# =========================================================================
-# PRE-PROCESSING: Filter and fix counter data
-# =========================================================================
+DECLARE @sql NVARCHAR(MAX) = 'SELECT FAB_ENTITY, counter_date FROM counters_raw WHERE '
+DECLARE @conditions NVARCHAR(MAX) = ''
 
-# Step 1: Exclude non-chamber entities (LP, VTM, LLM have no counter data)
-logger.info("PRE-PROCESSING: Filtering out non-chamber entities (LP, VTM, LLM)")
-print("PRE-PROCESSING: Filtering out non-chamber entities (LP, VTM, LLM)")
+-- Build conditions for all counter columns
+SELECT @conditions = @conditions + 
+    'AND (' + QUOTENAME(COLUMN_NAME) + ' IS NULL OR ' + QUOTENAME(COLUMN_NAME) + ' BETWEEN -5 AND 5) '
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = 'counters_raw'
+    AND COLUMN_NAME NOT IN (
+        'counters_raw_id', 'ENTITY', 'FAB', 'FAB_ENTITY', 
+        'source_file', 'load_ww', 'load_ts', 'load_date', 
+        'counter_date', 'file_modified_ts'
+    )
 
-before_filter = len(counters_df)
-counters_df = counters_df[
-    ~counters_df['ENTITY'].str.contains('_LP|_VTM|_LLM', case=False, regex=True)
-].reset_index(drop=True)
-after_filter = len(counters_df)
+-- Remove the leading 'AND '
+SET @conditions = STUFF(@conditions, 1, 4, '')
 
-logger.info(f"Filtered out {before_filter - after_filter} non-chamber rows, {after_filter} rows remaining")
-print(f"Filtered out {before_filter - after_filter} non-chamber rows, {after_filter} rows remaining")
+-- Add the entity exclusion filter
+SET @sql = @sql + @conditions + ' AND ENTITY NOT LIKE ''%_LP%'' AND ENTITY NOT LIKE ''%_VTM%'' AND ENTITY NOT LIKE ''%_LLM%'' ORDER BY FAB_ENTITY, counter_date'
 
-# Step 2: Fix disconnected counter rows
-logger.info("PRE-PROCESSING: Fixing disconnected counter rows")
-print("PRE-PROCESSING: Fixing disconnected counter rows")
+-- Show the query
+PRINT @sql
 
-counters_df = fix_disconnected_counter_rows(counters_df)
-
-print(f"PRE-PROCESSING COMPLETE - counters_df has {len(counters_df)} rows")
-logger.info("Pre-processing complete")
-print("Pre-processing complete")
-# =========================================================================
+-- Run it
+EXEC sp_executesql @sql
