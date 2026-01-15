@@ -140,3 +140,147 @@ def fix_disconnected_counter_rows(counters_df: pd.DataFrame) -> pd.DataFrame:
     print("Counter fix complete.")
     
     return df
+
+
+
+
+
+
+
+if previous_row is None:
+                logger.debug(
+                    f"{entity} on {current_row['counter_date']}: "
+                    f"First day, no previous row"
+                )
+
+            # Get running hours for this day
+            date = current_row["counter_date"]
+
+            # Match FAB_ENTITY first
+            fab_entity_match = state_hours_df[
+                state_hours_df["FAB_ENTITY"] == fab_entity
+            ]
+
+            if len(fab_entity_match) == 0:
+                if entity_count == 1:
+                    print(
+                        f" WARNING: No state_hours rows for FAB_ENTITY={fab_entity}"
+                    )
+                running_hours = 0
+                is_bagged = False
+            else:
+                # Then match date - try both with and without conversion
+                date_match = fab_entity_match[
+                    fab_entity_match["state_date"] == date
+                ]
+
+                if len(date_match) == 0:
+                    # Try converting date
+                    date_as_date = (
+                        pd.to_datetime(date).date()
+                        if not isinstance(
+                            date,
+                            type(pd.to_datetime("2020-01-01").date()),
+                        )
+                        else date
+                    )
+
+                    date_match = fab_entity_match[
+                        fab_entity_match["state_date"] == date_as_date
+                    ]
+
+                if len(date_match) > 0:
+                    running_hours = date_match["running_hours"].values[0]
+                    is_bagged = (
+                        bool(date_match["is_bagged"].values[0])
+                        if "is_bagged" in date_match.columns
+                        else False
+                    )
+                    if entity_count == 1:
+                        print(
+                            f" SUCCESS: Found running_hours={running_hours}, "
+                            f"is_bagged={is_bagged}"
+                        )
+                else:
+                    running_hours = 0
+                    is_bagged = False
+
+            # =========================================================
+            # FIRST DAY BASELINE: If no previous row, establish baseline
+            # =========================================================
+            if previous_row is None:
+                # Find the counter column and value for this entity
+                # (We need to determine what counter is being used)
+                counter_value = None
+                counter_column = None
+                counter_keyword = None
+                
+                # Get is_disconnected flag if it exists
+                is_disconnected = current_row.get("is_disconnected", False)
+                
+                # Search for a valid counter value in this row
+                for col in current_row.index:
+                    if col in ['FAB', 'ENTITY', 'FAB_ENTITY', 'counter_date', 
+                               'source_file', 'load_ww', 'load_ts', 'load_date',
+                               'file_modified_ts', 'counters_raw_id', 'is_disconnected']:
+                        continue
+                    val = current_row[col]
+                    if pd.notna(val):
+                        try:
+                            num_val = float(val)
+                            if num_val > 5:  # Valid counter value
+                                counter_value = num_val
+                                counter_column = col
+                                # Extract keyword if column has underscore
+                                if '_' in col:
+                                    counter_keyword = col.split('_')[0]
+                                else:
+                                    counter_keyword = col
+                                break
+                        except (ValueError, TypeError):
+                            continue
+                
+                result = {
+                    "FAB": current_row.get("FAB", ""),
+                    "ENTITY": entity,
+                    "FAB_ENTITY": current_row.get("FAB_ENTITY", ""),
+                    "counter_date": current_row["counter_date"],
+                    "previous_counter_date": None,
+                    "counter_column_used": counter_column,
+                    "counter_keyword_used": counter_keyword,
+                    "counter_current_value": counter_value,
+                    "counter_previous_value": counter_value,  # Same as current = baseline
+                    "counter_change": 0,
+                    "part_replacement_detected": False,
+                    "all_part_replacements": [],
+                    "wafers_produced": 0,  # Baseline = 0 wafers
+                    "running_hours": running_hours,
+                    "wafers_per_hour": 0,
+                    "is_disconnected": is_disconnected,
+                    "calculation_notes": [
+                        "First day - baseline established"
+                    ],
+                }
+                
+                results.append(result)
+                continue  # Skip to next row
+            # =========================================================
+
+            # Calculate production (for non-first-day rows)
+            result = self.calculate_wafer_production_single_row(
+                current_row,
+                previous_row,
+                running_hours,
+                is_bagged,
+            )
+            
+            # Carry through is_disconnected flag from counters data
+            result["is_disconnected"] = current_row.get("is_disconnected", False)
+
+            results.append(result)
+
+
+
+
+
+
