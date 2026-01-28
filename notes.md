@@ -4,19 +4,8 @@ def delete_existing_keys(
     key_columns: list
 ) -> int:
     """
-    Delete rows that would conflict with incoming data.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Incoming data
-    key_columns : list
-        Columns that form the unique key (e.g., ['FAB_ENTITY', 'state_date'])
-        
-    Returns
-    -------
-    int
-        Number of rows deleted
+    Delete rows that would conflict with incoming data using date range.
+    Much faster than row-by-row deletion.
     """
     if df.empty:
         return 0
@@ -28,38 +17,35 @@ def delete_existing_keys(
     cursor = conn.cursor()
     
     try:
-        # Get unique key combinations from incoming data
-        unique_keys = df[key_columns].drop_duplicates()
-        total_deleted = 0
+        # Find date column in key_columns
+        date_col = None
+        for col in key_columns:
+            if 'date' in col.lower():
+                date_col = col
+                break
         
-        # Build tuples for deletion
-        key_tuples = list(unique_keys.itertuples(index=False, name=None))
-        
-        if len(key_tuples) == 0:
-            return 0
-        
-        # Delete in batches to avoid parameter limits
-        batch_size = 500
-        total_batches = (len(key_tuples) + batch_size - 1) // batch_size
-        
-        for i in range(0, len(key_tuples), batch_size):
-            batch = key_tuples[i:i + batch_size]
-            batch_num = (i // batch_size) + 1
+        if date_col and date_col in df.columns:
+            # Fast path: delete by date range
+            min_date = df[date_col].min()
+            max_date = df[date_col].max()
             
-            # Build WHERE clause for this batch
-            if len(key_columns) == 1:
-                col = key_columns[0]
-                placeholders = ','.join(['?' for _ in batch])
-                values = [t[0] for t in batch]
+            delete_sql = f"""
+                DELETE FROM {self.schema}.{self.table_name}
+                WHERE [{date_col}] >= ? AND [{date_col}] <= ?
+            """
+            
+            print(f"Deleting existing rows for date range: {min_date} to {max_date}")
+            cursor.execute(delete_sql, (min_date, max_date))
+            
+        else:
+            # Fallback: delete by unique key combinations (slower)
+            unique_keys = df[key_columns].drop_duplicates()
+            key_tuples = list(unique_keys.itertuples(index=False, name=None))
+            
+            batch_size = 500
+            for i in range(0, len(key_tuples), batch_size):
+                batch = key_tuples[i:i + batch_size]
                 
-                delete_sql = f"""
-                    DELETE FROM {self.schema}.{self.table_name}
-                    WHERE [{col}] IN ({placeholders})
-                """
-                cursor.execute(delete_sql, values)
-                
-            else:
-                # Multiple column composite key
                 conditions = ' OR '.join([
                     '(' + ' AND '.join([f"[{col}] = ?" for col in key_columns]) + ')'
                     for _ in batch
@@ -74,12 +60,8 @@ def delete_existing_keys(
                     WHERE {conditions}
                 """
                 cursor.execute(delete_sql, params)
-            
-            total_deleted += cursor.rowcount
-            
-            if total_batches > 1:
-                print(f"  Delete batch {batch_num}/{total_batches}: {cursor.rowcount} rows")
         
+        total_deleted = cursor.rowcount
         conn.commit()
         
         if total_deleted > 0:
@@ -107,41 +89,47 @@ def delete_existing_keys(
 
 
 
-def load_to_sqlserver_upsert(
-    df: pd.DataFrame,
-    config: Dict,
-    table_params_key: str,
-    key_columns: list,
-    if_exists: str = "append",
-) -> int:
+
+
+
+
+
+def add_location_column(df: pd.DataFrame, fab_column: str = 'FAB') -> pd.DataFrame:
     """
-    Load DataFrame to SQL Server, deleting existing keys first (upsert pattern).
-    
-    Prevents duplicate key violations by removing existing rows before inserting.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame to load
-    config : dict
-        Configuration dictionary
-    table_params_key : str
-        Key for table parameters in config
-    key_columns : list
-        Columns that form the unique key
-    if_exists : str
-        What to do if table exists
-        
-    Returns
-    -------
-    int
-        Number of rows inserted
+    Adds Location column based on FAB mapping.
     """
-    engine = SQLServerEngine(config, table_params_key)
+    FAB_TO_LOCATION = {
+        "D1D": "Portland",
+        "D1X": "Portland",
+        "D1C": "Portland",
+        "AFO": "Portland",
+        "F11X": "Albuquerque",
+        "F12C": "Arizona",
+        "F21": "Albuquerque",
+        "F24": "Ireland",
+        "F28": "Israel",
+        "F32": "Arizona",
+        "F42": "Arizona",
+        "F52": "Arizona",
+    }
     
-    # Delete existing records that would conflict
-    if key_columns and len(df) > 0:
-        engine.delete_existing_keys(df, key_columns)
+    def map_fab(fab_val):
+        if isinstance(fab_val, str):
+            for fab_code, loc in FAB_TO_LOCATION.items():
+                if fab_code in fab_val:
+                    return loc
+        return "Unknown"
     
-    # Insert new data
-    return engine.load_dataframe(df, if_exists)
+    df['Location'] = df[fab_column].apply(map_fab)
+    return df
+
+
+
+
+
+
+
+
+
+
+
