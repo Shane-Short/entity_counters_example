@@ -1,126 +1,69 @@
-def delete_existing_keys(
-    self,
-    df: pd.DataFrame,
-    key_columns: list
-) -> int:
+# =============================================================================
+# LOCATION MAPPING
+# =============================================================================
+
+FAB_TO_LOCATION = {
+    "D1D": "Portland",
+    "D1X": "Portland", 
+    "D1C": "Portland",
+    "AFO": "Portland",
+    "F11": "Albuquerque",
+    "F11X": "Albuquerque",
+    "F21": "Albuquerque",
+    "F12": "Arizona",
+    "F12C": "Arizona",
+    "F32": "Arizona",
+    "F42": "Arizona",
+    "F52": "Arizona",
+    "F24": "Ireland",
+    "F28": "Israel",
+    "MAL": "Malaysia",
+}
+
+
+def map_fab_to_location(fab_code: str) -> str:
     """
-    Delete rows that would conflict with incoming data using date range.
-    Much faster than row-by-row deletion.
+    Map FAB code to standardized Location name.
+    
+    Args:
+        fab_code: FAB code string (e.g., 'D1D', 'F11X', 'F32')
+        
+    Returns:
+        Location name (e.g., 'Portland', 'Arizona') or 'Unknown'
     """
-    if df.empty:
-        return 0
-    
-    logger.info(f"Checking for existing keys to delete in {self.table_name}...")
-    print(f"Checking for existing keys to delete in {self.table_name}...")
-    
-    conn = self.get_connection()
-    cursor = conn.cursor()
-    
-    try:
-        # Find date column in key_columns
-        date_col = None
-        for col in key_columns:
-            if 'date' in col.lower():
-                date_col = col
-                break
-        
-        if date_col and date_col in df.columns:
-            # Fast path: delete by date range
-            min_date = df[date_col].min()
-            max_date = df[date_col].max()
-            
-            delete_sql = f"""
-                DELETE FROM {self.schema}.{self.table_name}
-                WHERE [{date_col}] >= ? AND [{date_col}] <= ?
-            """
-            
-            print(f"Deleting existing rows for date range: {min_date} to {max_date}")
-            cursor.execute(delete_sql, (min_date, max_date))
-            
-        else:
-            # Fallback: delete by unique key combinations (slower)
-            unique_keys = df[key_columns].drop_duplicates()
-            key_tuples = list(unique_keys.itertuples(index=False, name=None))
-            
-            batch_size = 500
-            for i in range(0, len(key_tuples), batch_size):
-                batch = key_tuples[i:i + batch_size]
-                
-                conditions = ' OR '.join([
-                    '(' + ' AND '.join([f"[{col}] = ?" for col in key_columns]) + ')'
-                    for _ in batch
-                ])
-                
-                params = []
-                for t in batch:
-                    params.extend(t)
-                
-                delete_sql = f"""
-                    DELETE FROM {self.schema}.{self.table_name}
-                    WHERE {conditions}
-                """
-                cursor.execute(delete_sql, params)
-        
-        total_deleted = cursor.rowcount
-        conn.commit()
-        
-        if total_deleted > 0:
-            logger.info(f"Deleted {total_deleted} existing rows from {self.table_name}")
-            print(f"Deleted {total_deleted} existing rows from {self.table_name}")
-        else:
-            logger.info(f"No existing rows to delete in {self.table_name}")
-            print(f"No existing rows to delete in {self.table_name}")
-        
-        return total_deleted
-        
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error deleting existing keys from {self.table_name}: {e}")
-        raise
-        
-    finally:
-        cursor.close()
-        conn.close()
-
-
-
-
-
-
-
-
-
-
-
-
-
-def add_location_column(df: pd.DataFrame, fab_column: str = 'FAB') -> pd.DataFrame:
-    """
-    Adds Location column based on FAB mapping.
-    """
-    FAB_TO_LOCATION = {
-        "D1D": "Portland",
-        "D1X": "Portland",
-        "D1C": "Portland",
-        "AFO": "Portland",
-        "F11X": "Albuquerque",
-        "F12C": "Arizona",
-        "F21": "Albuquerque",
-        "F24": "Ireland",
-        "F28": "Israel",
-        "F32": "Arizona",
-        "F42": "Arizona",
-        "F52": "Arizona",
-    }
-    
-    def map_fab(fab_val):
-        if isinstance(fab_val, str):
-            for fab_code, loc in FAB_TO_LOCATION.items():
-                if fab_code in fab_val:
-                    return loc
+    if pd.isna(fab_code) or fab_code is None:
         return "Unknown"
     
-    df['Location'] = df[fab_column].apply(map_fab)
+    fab_upper = str(fab_code).upper().strip()
+    
+    # Direct match first
+    if fab_upper in FAB_TO_LOCATION:
+        return FAB_TO_LOCATION[fab_upper]
+    
+    # Try prefix matching (e.g., 'D1D-SOMETHING' -> 'D1D')
+    for fab_key, location in FAB_TO_LOCATION.items():
+        if fab_upper.startswith(fab_key):
+            return location
+    
+    return "Unknown"
+
+
+def add_location_column(df: pd.DataFrame, fab_column: str = "FACILITY") -> pd.DataFrame:
+    """
+    Add Location column to DataFrame based on FAB/FACILITY column.
+    
+    Args:
+        df: DataFrame with FAB/FACILITY column
+        fab_column: Name of the column containing FAB codes (default: 'FACILITY')
+        
+    Returns:
+        DataFrame with Location column added
+    """
+    if fab_column not in df.columns:
+        df["Location"] = "Unknown"
+        return df
+    
+    df["Location"] = df[fab_column].apply(map_fab_to_location)
     return df
 
 
@@ -129,7 +72,30 @@ def add_location_column(df: pd.DataFrame, fab_column: str = 'FAB') -> pd.DataFra
 
 
 
+    def _add_metadata(
+    self,
+    df: pd.DataFrame,
+    file_path: Path,
+    work_week: str,
+) -> pd.DataFrame:
+    """
+    Add metadata columns to DataFrame.
+    """
+    df["load_timestamp"] = datetime.now()
+    df["source_file"] = str(file_path)
+    df["source_ww"] = work_week
+    
+    # Add Location column from FACILITY
+    df = add_location_column(df, fab_column="FACILITY")
+    self.logger.info(f"Location distribution: {df['Location'].value_counts().to_dict()}")
+
+    self.logger.debug("Added metadata columns")
+    return df
 
 
 
 
+
+
+
+    
