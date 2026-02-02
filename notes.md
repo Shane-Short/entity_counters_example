@@ -1,58 +1,145 @@
-def _create_ceid_kpis(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Create tool-level KPIs aggregated by CEID + YEARWW.
+import pandas as pd
+import numpy as np
 
-        One row per CEID per YEARWW.
 
-        Args:
-            df: Enriched DataFrame
+def _count_configured_processes(val) -> int:
+    """
+    Count how many configured process nodes are present in a CONFIGURED_PROCESSES cell.
 
-        Returns:
-            DataFrame with CEID-level KPIs
-        """
-        self.logger.info("Creating CEID-level KPIs...")
-        
-        # Use named aggregations for cleaner column names
-        ceid_kpis = (
-            df.groupby(["FACILITY", "CEID", "YEARWW", "Location"])
-            .agg(
-                total_pm_events=("ENTITY", "count"),
-                avg_pm_life=("CUSTOM_DELTA", "mean"),
-                median_pm_life=("CUSTOM_DELTA", "median"),
-                pm_life_std_dev=("CUSTOM_DELTA", "std"),
-                total_downtime_hours=("DOWN_WINDOW_DURATION_HR", "sum"),
-                avg_downtime_hours=("DOWN_WINDOW_DURATION_HR", "mean"),
-                median_downtime_hours=("DOWN_WINDOW_DURATION_HR", "median"),
-                scheduled_pm_count=("scheduled_flag", lambda x: (x == 1).sum()),
-                early_pm_count=("pm_timing_classification", lambda x: (x == "Early").sum()),
-                on_time_pm_count=("pm_timing_classification", lambda x: (x == "On-Time").sum()),
-                late_pm_count=("pm_timing_classification", lambda x: (x == "Late").sum()),
-                overdue_pm_count=("pm_timing_classification", lambda x: (x == "Overdue").sum()),
-                reclean_count=("reclean_event_flag", lambda x: (x == 1).sum()),
-                sympathy_pm_count=("sympathy_pm_flag", lambda x: (x == 1).sum()),
-                ww_year=("ww_year", "first"),
-                ww_number=("ww_number", "first"),
-            )
-            .reset_index()
-        )
-        
-        self.logger.info(f"CEID KPIs columns after aggregation: {list(ceid_kpis.columns)}")
+    Parameters
+    ----------
+    val : Any
+        Cell value that may be a delimited string like "1276, 1278" or "1276;1278".
 
-        # Calculate derived metrics
-        ceid_kpis["unscheduled_pm_count"] = (
-            ceid_kpis["total_pm_events"] - ceid_kpis["scheduled_pm_count"]
-        )
-        
-        ceid_kpis["unscheduled_pm_rate"] = (
-            ceid_kpis["unscheduled_pm_count"] / ceid_kpis["total_pm_events"]
-        ).fillna(0)
+    Returns
+    -------
+    int
+        Number of distinct non-empty tokens detected.
+    """
+    if pd.isna(val):
+        return 0
 
-        ceid_kpis["reclean_rate"] = (
-            ceid_kpis["reclean_count"] / ceid_kpis["total_pm_events"]
-        ).fillna(0)
+    s = str(val).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return 0
 
-        ceid_kpis["calculation_timestamp"] = datetime.now()
-        
-        self.logger.info(f"Created {len(ceid_kpis):,} CEID KPI rows")
+    # split on common delimiters: comma, semicolon, pipe
+    tokens = [t.strip() for t in re.split(r"[;,|]", s) if t.strip()]
+    # optional: de-dupe tokens
+    return len(set(tokens))
 
-        return ceid_kpis
+
+def select_best_ceid_rows(
+    ceid_df: pd.DataFrame,
+    *,
+    fab_col: str = "FAB",
+    entity_col: str = "ENTITY",
+    ww_col: str = "WW",
+    vfmfgid_col: str = "VFMFGID",
+    configured_processes_col: str = "CONFIGURED_PROCESSES",
+    inserted_at_col: str | None = "InsertedAt",
+) -> pd.DataFrame:
+    """
+    Collapse CEID_ES to one "best" row per (FAB, ENTITY) using the most recent WW and
+    deterministic tie-breakers for duplicates within that WW.
+
+    The selection logic:
+    1) Keep only rows from the max WW per (FAB, ENTITY).
+    2) If duplicates remain within that WW, rank rows by:
+       a) ENTITY has '_PM' (preferred) over '_PC'
+       b) VFMFGID is non-empty
+       c) larger count of CONFIGURED_PROCESSES tokens
+       d) most recent InsertedAt (if provided), else stable fallback
+
+    Parameters
+    ----------
+    ceid_df : pandas.DataFrame
+        Raw CEID_ES dataframe.
+    fab_col : str, default "FAB"
+        Column name representing fab (or fab location key).
+    entity_col : str, default "ENTITY"
+        Column name for tool entity.
+    ww_col : str, default "WW"
+        Column name for work week.
+    vfmfgid_col : str, default "VFMFGID"
+        Column name for VFMFGID.
+    configured_processes_col : str, default "CONFIGURED_PROCESSES"
+        Column name for configured processes list/string.
+    inserted_at_col : str or None, default "InsertedAt"
+        Column used as a "most recent row" tie-breaker. If None or missing, a stable
+        fallback ordering is used.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A filtered dataframe containing exactly one row per (FAB, ENTITY) (from the
+        latest WW for that pair).
+
+    Raises
+    ------
+    KeyError
+        If required columns are missing.
+    """
+    required = {fab_col, entity_col, ww_col}
+    missing = required - set(ceid_df.columns)
+    if missing:
+        raise KeyError(f"CEID_ES is missing required columns: {sorted(missing)}")
+
+    df = ceid_df.copy()
+
+    # ---- 1) Keep only latest WW per (FAB, ENTITY)
+    # Note: this assumes WW is sortable (e.g., '2025WW49'). If not, normalize first.
+    df["_max_ww"] = df.groupby([fab_col, entity_col])[ww_col].transform("max")
+    df = df[df[ww_col] == df["_max_ww"]].drop(columns=["_max_ww"])
+
+    # ---- 2) Build ranking features for tie-breaks
+    entity_s = df[entity_col].astype(str)
+
+    df["_pm_pref"] = entity_s.str.contains(r"_PM\d+", regex=True, na=False).astype(int)
+    df["_pc_flag"] = entity_s.str.contains(r"_PC\d+", regex=True, na=False).astype(int)
+    # score PM above PC; if neither, 0
+    df["_pm_over_pc"] = np.where(df["_pm_pref"] == 1, 2, np.where(df["_pc_flag"] == 1, 1, 0))
+
+    if vfmfgid_col in df.columns:
+        v = df[vfmfgid_col]
+        df["_has_vfmfgid"] = (
+            v.notna() & (v.astype(str).str.strip() != "") & (~v.astype(str).str.lower().isin(["nan", "none"]))
+        ).astype(int)
+    else:
+        df["_has_vfmfgid"] = 0
+
+    if configured_processes_col in df.columns:
+        import re
+        df["_proc_count"] = df[configured_processes_col].apply(_count_configured_processes)
+    else:
+        df["_proc_count"] = 0
+
+    # InsertedAt tie-breaker (optional)
+    if inserted_at_col and inserted_at_col in df.columns:
+        df["_inserted_at"] = pd.to_datetime(df[inserted_at_col], errors="coerce")
+    else:
+        df["_inserted_at"] = pd.NaT
+
+    # ---- 3) Sort and take the top row per (FAB, ENTITY)
+    # Higher is better for _pm_over_pc, _has_vfmfgid, _proc_count, _inserted_at
+    df = df.sort_values(
+        by=[fab_col, entity_col, "_pm_over_pc", "_has_vfmfgid", "_proc_count", "_inserted_at"],
+        ascending=[True, True, False, False, False, False],
+        kind="mergesort",  # stable sort helps reproducibility
+    )
+
+    df = df.drop_duplicates(subset=[fab_col, entity_col], keep="first")
+
+    # cleanup
+    df = df.drop(columns=["_pm_pref", "_pc_flag", "_pm_over_pc", "_has_vfmfgid", "_proc_count", "_inserted_at"], errors="ignore")
+
+    return df
+
+
+
+
+
+
+
+
+
