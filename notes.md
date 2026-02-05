@@ -1,33 +1,7 @@
-def apply_altair_flag(df: pd.DataFrame, altair_path: str = "data/altair_tools.csv") -> pd.DataFrame:
-    """
-    Adds Altair_Flag column to a dataframe based on ENTITY matching.
+Thank you again for taking the time to speak with me today. I really enjoyed our conversation and appreciated the overview of the team’s work around product security, PSIRT, and compliance with the EU Cyber Resilience Act.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Dataframe containing an ENTITY column to match against altair tools.
-    altair_path : str, optional
-        Path to the altair_tools.csv file. Default is "data/altair_tools.csv".
+After learning more about the role, I’m very excited about the opportunity and feel it aligns extremely well with both my background and interests. The focus on governance, incident coordination, training, and acting as a liaison between engineering, factories, SOC, customers, and external authorities is exactly the kind of work where I believe I can add the most value.
 
-    Returns
-    -------
-    pd.DataFrame
-        Dataframe with Altair_Flag column added (ALTAIR, MIX, or NON-ALTAIR).
-    """
-    # Load altair tools reference file
-    altair_df = pd.read_csv(altair_path)
-    altair_df["ENTITY"] = altair_df["ENTITY"].astype(str).str.strip()
+Given my experience at TEL across field service, technical support, and data engineering, I’m very familiar with our systems, workflows, and cross-functional teams, and I’m comfortable communicating between technical and non-technical stakeholders. I’m particularly interested in helping improve and automate incident reporting and notification workflows, supporting CRA compliance, and ensuring teams have clear, practical processes they can follow with confidence.
 
-    # Merge altair flag onto df based on ENTITY
-    df = df.merge(
-        altair_df[["ENTITY", "ProcessAllowed"]],
-        on="ENTITY",
-        how="left"
-    )
-
-    # Rename and fill missing/blank values with NON-ALTAIR
-    df = df.rename(columns={"ProcessAllowed": "Altair_Flag"})
-    df["Altair_Flag"] = df["Altair_Flag"].fillna("").str.strip()
-    df.loc[df["Altair_Flag"] == "", "Altair_Flag"] = "NON-ALTAIR"
-
-    return df
+Thank you again for the discussion. Please don’t hesitate to reach out if there’s anything else I can provide or clarify. I would be very happy to continue the conversation and contribute to the team.
