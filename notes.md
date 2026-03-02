@@ -52,7 +52,7 @@ We are using three primary datasets:
 
 ---
 
-## 4. High-Level Architecture
+## 4. High-Level Architecture (Phase 1)
 
 ```
 Current Inventory
@@ -61,13 +61,15 @@ Current Inventory
         v
 Normalized GBOM
         |
-        | Match on Platform + Three_CEID + Tool_Type + Process_Node
+        | Match on Platform + Three_CEID + Process_Node
         v
 Auto Tool List (Active Tools Only)
         |
         v
 Executive & Drilldown Outputs
 ```
+
+> NOTE: `Tool_Type` is included for reporting context but is NOT used as a join key in Phase 1 due to mismatch between GBOM subtype granularity and Auto Tool List data.
 
 ---
 
@@ -114,14 +116,14 @@ This is not join-friendly. We convert it to a row-based structure.
 - `Part_Number`  
 - `Platform`  
 - `Three_CEID`  
-- `Tool_Type`  
+- `Tool_Type` (for reporting only in Phase 1)  
 - `Process_Node`  
 
 | Field | Definition |
 |--------|------------|
-| Platform | Tool platform family (e.g., Telus, Tactras) |
+| Platform | Tool platform family |
 | Three_CEID | First three letters of CEID |
-| Tool_Type | Tool subtype classification |
+| Tool_Type | Tool subtype classification (not used for join in Phase 1) |
 | Process_Node | Numeric process node (e.g., 1274) |
 | Qty_Per_Tool | Number of this part used per tool |
 
@@ -136,15 +138,28 @@ This is not join-friendly. We convert it to a row-based structure.
 - `ENTITY`  
 - `Process_Node`  
 
-**Active tool definition:**
+**Included Columns (Phase 1):**
+
+- `PF` (renamed to `Platform`)
+- `Three_CEID` (directly sourced — not recalculated)
+- `Process_Node`
+- `install_sts`
+- `Location`
+
+> NOTE: Auto Tool List does NOT currently include GBOM-level `Tool_Type` granularity (e.g., RLSA-BB). Therefore, Tool_Type is not used in Phase 1 joins.
+
+---
+
+### Active Tool Definition
 
 ```
 install_sts NOT IN ('Bagged', 'Not Installed')
 ```
 
 This excludes:
+
 - Bagged tools  
-- Tools that are not installed in the fab  
+- Tools not installed in the fab  
 
 ---
 
@@ -152,20 +167,73 @@ This excludes:
 
 **Purpose:** Pre-aggregates active tool counts for efficient joins.
 
-**Grain:** One row per:
+**Phase 1 Grain:** One row per:
 
-- `Platform`  
-- `Three_CEID`  
-- `Tool_Type`  
-- `Process_Node`  
+- `Platform`
+- `Three_CEID`
+- `Process_Node`
 
-**Measures:**
-
-- `Active_Tool_Count` (distinct count of active `ENTITY`)
+> Tool_Type is excluded from aggregation grain in Phase 1.
 
 ---
 
-## 6. Join Logic
+### Critical Counting Logic (Prevents Overcounting)
+
+The Auto Tool List contains multiple rows per tool (`ENTITY`) — one per `Process_Node`.
+
+If we counted rows directly, a single tool with 12 process nodes would incorrectly count as 12 tools.
+
+To prevent this:
+
+**All tool counts must use:**
+
+```
+COUNT(DISTINCT ENTITY)
+```
+
+We never use raw row counts.
+
+---
+
+### Installed Base Metrics
+
+#### 1. `Active_Tool_Count_Config`
+
+Distinct count of active tools matching:
+
+- Platform  
+- Three_CEID  
+- Process_Node  
+
+**Calculation:**
+
+```
+COUNT(DISTINCT ENTITY)
+GROUP BY Platform, Three_CEID, Process_Node
+```
+
+This answers:
+> How many active tools exist for this configuration?
+
+---
+
+#### 2. `Active_Tool_Count_Unique`
+
+Distinct count of active tools across all configurations a part supports.
+
+**Calculation (after joining GBOM → ATL):**
+
+```
+COUNT(DISTINCT ENTITY)
+GROUP BY Part_Number
+```
+
+This answers:
+> How many unique active tools does this part support overall?
+
+---
+
+## 6. Join Logic (Phase 1)
 
 ### Step 1  
 Join Inventory → GBOM on:
@@ -175,16 +243,17 @@ Part_Number
 ```
 
 ### Step 2  
-Join GBOM → Installed Base on:
+Join GBOM → Active Installed Base on:
 
 ```
 Platform
 Three_CEID
-Tool_Type
 Process_Node
 ```
 
-This determines whether a part supports any active tools.
+> Tool_Type is excluded from join keys in Phase 1.
+
+All tool counts use `COUNT(DISTINCT ENTITY)`.
 
 ---
 
@@ -192,53 +261,79 @@ This determines whether a part supports any active tools.
 
 ---
 
-### 7.1 Output 1 — Executive Table
+## 7.1 Output 1 — Executive Table
 
-**Grain:** One row per `Part_Number`.
-
-**Includes:**
-
-Inventory metrics:
-- `Qty`
-- `Total_Amount`
-- `Age`
-- `MOU12`
-- `MOU36`
-
-Applicability rollups (comma lists):
-- Platforms
-- Three_CEIDs
-- Tool_Types
-- Process_Nodes
-
-Installed base:
-- `Active_Tool_Count_Total`
-- `Active_Installed_Flag` (Y/N)
-
-Disposition:
-- `Disposition_Category`
-- `Confidence_Level`
+**Grain:** One row per `Part_Number`
 
 ---
 
-### 7.2 Output 2 — Drilldown Table
+### Inventory Metrics
+
+| Column | Definition | Calculation |
+|---------|------------|-------------|
+| Qty_Total | Total on-hand quantity | SUM(Qty) |
+| Total_Amount_USD | Total dollar exposure | SUM(Total_Amount) |
+| MOU12 | Months used (12m) | MAX or AVG (documented choice) |
+| MOU36 | Months used (36m) | MAX or AVG (documented choice) |
+
+---
+
+### Applicability Rollups
+
+| Column | Definition | Calculation |
+|---------|------------|-------------|
+| Platforms | Platforms supported | STRING_AGG(DISTINCT Platform) |
+| Three_CEIDs | CEID groups supported | STRING_AGG(DISTINCT Three_CEID) |
+| Tool_Types | Tool types supported (reporting only) | STRING_AGG(DISTINCT Tool_Type) |
+| Process_Nodes | Process nodes supported | STRING_AGG(DISTINCT Process_Node) |
+
+---
+
+### Installed Base Metrics
+
+| Column | Definition | Calculation |
+|---------|------------|-------------|
+| Active_Tool_Count_Config_Total | Sum of config-level counts | SUM(Active_Tool_Count_Config) |
+| Active_Tool_Count_Unique | Distinct active tools overall | COUNT(DISTINCT ENTITY) |
+| Active_Installed_Flag | Indicates support of active tools | CASE WHEN Unique_Count > 0 THEN 'Y' ELSE 'N' |
+
+---
+
+### Disposition Fields
+
+| Column | Logic |
+|---------|-------|
+| Disposition_Category | Sell / Investigate / Divest |
+| Confidence_Level | High / Medium / Low |
+
+Logic:
+
+- Sell to Intel → GBOM match AND Active_Installed_Flag = Y  
+- Investigate → GBOM match AND Active_Installed_Flag = N  
+- Divest/Scrap → No GBOM match  
+
+---
+
+## 7.2 Output 2 — Drilldown Table
 
 **Grain:** One row per:
 
 - `Part_Number`
 - `Platform`
 - `Three_CEID`
-- `Tool_Type`
 - `Process_Node`
+- `Tool_Type` (reporting only)
 
-**Includes:**
+---
 
-- `Qty`
-- `Total_Amount`
-- `Qty_Per_Tool`
-- `Active_Tool_Count`
+### Columns
 
-Including `Qty` and `Total_Amount` allows prioritization of the highest financial exposure parts.
+| Column | Definition | Calculation |
+|---------|------------|-------------|
+| Qty_Total | Total inventory qty | SUM(Qty) |
+| Total_Amount_USD | Total exposure | SUM(Total_Amount) |
+| Qty_Per_Tool | Units required per tool | From GBOM |
+| Active_Tool_Count_Config | Distinct active tools for config | COUNT(DISTINCT ENTITY) |
 
 ---
 
@@ -246,7 +341,7 @@ Including `Qty` and `Total_Amount` allows prioritization of the highest financia
 
 ### High Confidence — Sell to Intel
 - Part exists in GBOM  
-- At least one matching active tool configuration exists  
+- At least one matching active tool exists  
 
 ### Medium Confidence — Investigate
 - Part exists in GBOM  
@@ -277,7 +372,7 @@ Including `Qty` and `Total_Amount` allows prioritization of the highest financia
 |--------|----------|
 | Platform | Tool family |
 | Three_CEID | CEID grouping |
-| Tool_Type | Sub-type classification |
+| Tool_Type | Sub-type classification (not used in Phase 1 joins) |
 | Process_Node | Process configuration |
 | Qty_Per_Tool | Units per tool |
 
@@ -287,10 +382,12 @@ Including `Qty` and `Total_Amount` allows prioritization of the highest financia
 
 | Field | Meaning |
 |--------|----------|
-| ENTITY | Tool identifier |
+| ENTITY | Unique tool identifier |
 | install_sts | Installation status |
-| Location | Fab location |
+| Three_CEID | CEID grouping |
+| PF (Platform) | Tool family |
 | Process_Node | Process configuration |
+| Location | Fab location |
 
 ---
 
@@ -309,7 +406,7 @@ Including `Qty` and `Total_Amount` allows prioritization of the highest financia
                 ▼
 ┌─────────────────────────────┐
 │ Active Installed Base       │
-│ (Filtered for Active Only)  │
+│ (DISTINCT ENTITY Count)     │
 └───────────────┬─────────────┘
                 │
                 ▼
@@ -325,8 +422,9 @@ Including `Qty` and `Total_Amount` allows prioritization of the highest financia
 - All raw files stored in SQL  
 - GBOM normalized once  
 - Active tool logic centralized  
+- DISTINCT-based counting prevents overcount  
 - Clear grain definitions  
-- No Excel-based logic  
+- Tool_Type deferred until proper mapping exists  
 - Fully reproducible  
 - Easy for another developer to resume  
 
