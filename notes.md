@@ -1,74 +1,61 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Inventory Installed Base Analysis - Project Technical Design & Business Documentation</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; line-height: 1.5; margin: 32px; color: #111; }
-    h1, h2, h3 { line-height: 1.2; }
-    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    pre { background: #f6f8fa; padding: 12px; border-radius: 8px; overflow: auto; }
-    table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-    th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
-    th { background: #f2f2f2; }
-    hr { border: 0; border-top: 1px solid #e5e5e5; margin: 24px 0; }
-  </style>
-</head>
-<body>
-  <h1>Inventory Installed Base Analysis</h1>
-  <h2>Project Technical Design &amp; Business Documentation</h2>
+# Inventory Installed Base Analysis  
+## Project Technical Design & Business Documentation
 
-  <hr />
+---
 
-  <h2>1. Objective</h2>
-  <p>Leadership identified millions of dollars of parts sitting in warehouse inventory.</p>
-  <p>The goal of this project is to determine:</p>
-  <blockquote>
-    <p><strong>Which inventory parts support active Intel tools, and which do not?</strong></p>
-  </blockquote>
-  <p>This enables us to:</p>
-  <ul>
-    <li><p>Sell parts back to Intel</p></li>
-    <li><p>Reposition parts to other customers</p></li>
-    <li><p>Identify obsolete inventory</p></li>
-    <li><p>Reduce warehouse footprint</p></li>
-    <li><p>Recover capital</p></li>
-  </ul>
+## 1. Objective
 
-  <hr />
+Leadership identified millions of dollars of parts sitting in warehouse inventory.
 
-  <h2>2. Scope &amp; Supplier Handling</h2>
-  <p>We will <strong>load all supplier codes</strong> from the inventory file into SQL.</p>
-  <p>We will <strong>not</strong> filter <code>Supplier_Code</code> during raw ingestion.</p>
-  <p>Instead:</p>
-  <ul>
-    <li><p>When we join Inventory &rarr; GBOM on <code>Part_Number</code></p></li>
-    <li><p>Any part that does not exist in GBOM will naturally drop from relevance</p></li>
-    <li><p>Final reporting can optionally filter to <code>Supplier_Code = 'ES'</code> if needed</p></li>
-  </ul>
-  <h3>Why this approach?</h3>
-  <ul>
-    <li><p>Prevents accidental data loss</p></li>
-    <li><p>Keeps raw ingestion neutral and reproducible</p></li>
-    <li><p>Makes the pipeline reusable</p></li>
-    <li><p>Allows future expansion beyond ES inventory</p></li>
-  </ul>
+The goal of this project is to determine:
 
-  <hr />
+> **Which inventory parts support active Intel tools, and which do not?**
 
-  <h2>3. Data Sources</h2>
-  <p>We are using three primary datasets:</p>
-  <ol>
-    <li><p><strong>Current Inventory</strong> (<code>current_inventory.xlsb</code>)</p></li>
-    <li><p><strong>GBOM</strong> (<code>GBOM.xlsx</code>)</p></li>
-    <li><p><strong>Auto Tool List</strong> (<code>Auto_Tool_List.csv</code>)</p></li>
-  </ol>
+This enables us to:
 
-  <hr />
+- Sell parts back to Intel  
+- Reposition parts to other customers  
+- Identify obsolete inventory  
+- Reduce warehouse footprint  
+- Recover capital  
 
-  <h2>4. High-Level Architecture</h2>
-  <pre><code>Current Inventory
+---
+
+## 2. Scope & Supplier Handling
+
+We will **load all supplier codes** from the inventory file into SQL.
+
+We will **not** filter `Supplier_Code` during raw ingestion.
+
+Instead:
+
+- When we join Inventory → GBOM on `Part_Number`
+- Any part that does not exist in GBOM will naturally drop from relevance
+- Final reporting can optionally filter to `Supplier_Code = 'ES'` if needed
+
+### Why this approach?
+
+- Prevents accidental data loss  
+- Keeps raw ingestion neutral and reproducible  
+- Makes the pipeline reusable  
+- Allows future expansion beyond ES inventory  
+
+---
+
+## 3. Data Sources
+
+We are using three primary datasets:
+
+1. **Current Inventory** (`current_inventory.xlsb`)  
+2. **GBOM** (`GBOM.xlsx`)  
+3. **Auto Tool List** (`Auto_Tool_List.csv`)  
+
+---
+
+## 4. High-Level Architecture
+
+```
+Current Inventory
         |
         | Join on Part_Number
         v
@@ -79,176 +66,238 @@ Normalized GBOM
 Auto Tool List (Active Tools Only)
         |
         v
-Executive &amp; Drilldown Outputs</code></pre>
+Executive & Drilldown Outputs
+```
 
-  <hr />
+---
 
-  <h2>5. Data Model</h2>
+## 5. Data Model
 
-  <h3>5.1 Inventory Table (<code>cur_inventory</code>)</h3>
-  <p><strong>Purpose:</strong> Represents all warehouse inventory.</p>
-  <p><strong>Grain:</strong> One row per:</p>
-  <ul>
-    <li><p><code>Region_Name</code></p></li>
-    <li><p><code>Supplier_Code</code></p></li>
-    <li><p><code>StorageLocation_Description</code></p></li>
-    <li><p><code>Part_Number</code></p></li>
-  </ul>
+---
 
-  <p><strong>Key Fields:</strong></p>
-  <table>
-    <thead>
-      <tr><th>Field</th><th>Definition</th></tr>
-    </thead>
-    <tbody>
-      <tr><td>Part_Number</td><td>Unique identifier of the part</td></tr>
-      <tr><td>Qty</td><td>Quantity currently stored</td></tr>
-      <tr><td>Total_Amount</td><td>Total dollar value</td></tr>
-      <tr><td>Age</td><td>Time in storage</td></tr>
-      <tr><td>MOU12</td><td>Months of use over last 12 months</td></tr>
-      <tr><td>MOU36</td><td>Months of use over last 36 months</td></tr>
-      <tr><td>ABC_LOCAL</td><td>Inventory priority classification</td></tr>
-      <tr><td>NIS Machine Code</td><td>Internal tool classification</td></tr>
-    </tbody>
-  </table>
+### 5.1 Inventory Table (`cur_inventory`)
 
-  <h3>5.2 GBOM Applicability (<code>cur_gbom_applicability</code>)</h3>
-  <p><strong>Purpose:</strong> Defines which tool configurations each part supports.</p>
-  <p><strong>Why normalize?</strong> GBOM is structured as a wide matrix with process nodes as columns. This is not join-friendly. We convert it to a row-based structure.</p>
-  <p><strong>Grain:</strong> One row per:</p>
-  <ul>
-    <li><p><code>Part_Number</code></p></li>
-    <li><p><code>Platform</code></p></li>
-    <li><p><code>Three_CEID</code></p></li>
-    <li><p><code>Tool_Type</code></p></li>
-    <li><p><code>Process_Node</code></p></li>
-  </ul>
+**Purpose:** Represents all warehouse inventory.
 
-  <table>
-    <thead>
-      <tr><th>Field</th><th>Definition</th></tr>
-    </thead>
-    <tbody>
-      <tr><td>Platform</td><td>Tool platform family (e.g., Telus, Tactras)</td></tr>
-      <tr><td>Three_CEID</td><td>First three letters of CEID</td></tr>
-      <tr><td>Tool_Type</td><td>Tool subtype classification</td></tr>
-      <tr><td>Process_Node</td><td>Numeric process node (e.g., 1274)</td></tr>
-      <tr><td>Qty_Per_Tool</td><td>Number of this part used per tool</td></tr>
-    </tbody>
-  </table>
+**Grain:** One row per:
 
-  <h3>5.3 Auto Tool List (<code>cur_auto_tool_list</code>)</h3>
-  <p><strong>Purpose:</strong> Represents Intel's installed tool base.</p>
-  <p><strong>Grain:</strong> One row per <code>ENTITY</code> + <code>Process_Node</code>.</p>
-  <p><strong>Active tool definition:</strong> A tool is considered active if:</p>
-  <pre><code>install_sts NOT IN ('Bagged', 'Not Installed')</code></pre>
-  <p>This excludes bagged tools and tools that are not installed in the fab.</p>
+- `Region_Name`  
+- `Supplier_Code`  
+- `StorageLocation_Description`  
+- `Part_Number`  
 
-  <h3>5.4 Installed Base Aggregation (<code>mart_installed_base_by_config</code>)</h3>
-  <p><strong>Purpose:</strong> Pre-aggregates active tool counts for efficient joins.</p>
-  <p><strong>Grain:</strong> One row per <code>Platform</code> + <code>Three_CEID</code> + <code>Tool_Type</code> + <code>Process_Node</code>.</p>
-  <p><strong>Measures:</strong></p>
-  <ul>
-    <li><p><code>Active_Tool_Count</code> (distinct count of active <code>ENTITY</code>)</p></li>
-  </ul>
+#### Key Fields
 
-  <hr />
+| Field | Definition |
+|--------|------------|
+| Part_Number | Unique identifier of the part |
+| Qty | Quantity currently stored |
+| Total_Amount | Total dollar value |
+| Age | Time in storage |
+| MOU12 | Months of use over last 12 months |
+| MOU36 | Months of use over last 36 months |
+| ABC_LOCAL | Inventory priority classification |
+| NIS Machine Code | Internal tool classification |
 
-  <h2>6. Join Logic</h2>
-  <h3>Step 1</h3>
-  <p>Join Inventory &rarr; GBOM on:</p>
-  <pre><code>Part_Number</code></pre>
+---
 
-  <h3>Step 2</h3>
-  <p>Join GBOM &rarr; Installed Base on:</p>
-  <pre><code>Platform
+### 5.2 GBOM Applicability (`cur_gbom_applicability`)
+
+**Purpose:** Defines which tool configurations each part supports.
+
+**Why normalize?**  
+GBOM is structured as a wide matrix with process nodes as columns.  
+This is not join-friendly. We convert it to a row-based structure.
+
+**Grain:** One row per:
+
+- `Part_Number`  
+- `Platform`  
+- `Three_CEID`  
+- `Tool_Type`  
+- `Process_Node`  
+
+| Field | Definition |
+|--------|------------|
+| Platform | Tool platform family (e.g., Telus, Tactras) |
+| Three_CEID | First three letters of CEID |
+| Tool_Type | Tool subtype classification |
+| Process_Node | Numeric process node (e.g., 1274) |
+| Qty_Per_Tool | Number of this part used per tool |
+
+---
+
+### 5.3 Auto Tool List (`cur_auto_tool_list`)
+
+**Purpose:** Represents Intel's installed tool base.
+
+**Grain:** One row per:
+
+- `ENTITY`  
+- `Process_Node`  
+
+**Active tool definition:**
+
+```
+install_sts NOT IN ('Bagged', 'Not Installed')
+```
+
+This excludes:
+- Bagged tools  
+- Tools that are not installed in the fab  
+
+---
+
+### 5.4 Installed Base Aggregation (`mart_installed_base_by_config`)
+
+**Purpose:** Pre-aggregates active tool counts for efficient joins.
+
+**Grain:** One row per:
+
+- `Platform`  
+- `Three_CEID`  
+- `Tool_Type`  
+- `Process_Node`  
+
+**Measures:**
+
+- `Active_Tool_Count` (distinct count of active `ENTITY`)
+
+---
+
+## 6. Join Logic
+
+### Step 1  
+Join Inventory → GBOM on:
+
+```
+Part_Number
+```
+
+### Step 2  
+Join GBOM → Installed Base on:
+
+```
+Platform
 Three_CEID
 Tool_Type
-Process_Node</code></pre>
-  <p>This determines whether a part supports any active tools.</p>
+Process_Node
+```
 
-  <hr />
+This determines whether a part supports any active tools.
 
-  <h2>7. Final Outputs</h2>
+---
 
-  <h3>7.1 Output 1 &mdash; Executive Table</h3>
-  <p><strong>Grain:</strong> One row per <code>Part_Number</code>.</p>
-  <p><strong>Includes:</strong></p>
-  <ul>
-    <li><p>Inventory metrics: <code>Qty</code>, <code>Total_Amount</code>, <code>Age</code>, <code>MOU12</code>, <code>MOU36</code></p></li>
-    <li><p>Applicability rollups (comma lists): Platforms, Three_CEIDs, Tool_Types, Process_Nodes</p></li>
-    <li><p>Installed base: <code>Active_Tool_Count_Total</code>, <code>Active_Installed_Flag</code> (Y/N)</p></li>
-    <li><p>Disposition: <code>Disposition_Category</code>, <code>Confidence_Level</code></p></li>
-  </ul>
+## 7. Final Outputs
 
-  <h3>7.2 Output 2 &mdash; Drilldown Table</h3>
-  <p><strong>Grain:</strong> One row per <code>Part_Number</code> + <code>Platform</code> + <code>Three_CEID</code> + <code>Tool_Type</code> + <code>Process_Node</code>.</p>
-  <p><strong>Includes:</strong> <code>Qty</code>, <code>Total_Amount</code>, <code>Qty_Per_Tool</code>, <code>Active_Tool_Count</code>.</p>
-  <p>Including <code>Qty</code> and <code>Total_Amount</code> here allows prioritization of the highest financial exposure parts.</p>
+---
 
-  <hr />
+### 7.1 Output 1 — Executive Table
 
-  <h2>8. Disposition Logic</h2>
-  <h3>High Confidence &mdash; Sell to Intel</h3>
-  <ul>
-    <li><p>Part exists in GBOM</p></li>
-    <li><p>At least one matching active tool configuration exists</p></li>
-  </ul>
+**Grain:** One row per `Part_Number`.
 
-  <h3>Medium Confidence &mdash; Investigate</h3>
-  <ul>
-    <li><p>Part exists in GBOM</p></li>
-    <li><p>No matching active tools found</p></li>
-  </ul>
+**Includes:**
 
-  <h3>Low Confidence &mdash; Divest / Scrap Candidate</h3>
-  <ul>
-    <li><p>No GBOM match found</p></li>
-  </ul>
+Inventory metrics:
+- `Qty`
+- `Total_Amount`
+- `Age`
+- `MOU12`
+- `MOU36`
 
-  <hr />
+Applicability rollups (comma lists):
+- Platforms
+- Three_CEIDs
+- Tool_Types
+- Process_Nodes
 
-  <h2>9. Full Field Definitions</h2>
+Installed base:
+- `Active_Tool_Count_Total`
+- `Active_Installed_Flag` (Y/N)
 
-  <h3>Inventory</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Age</td><td>Time since part entered storage</td></tr>
-      <tr><td>MOU12</td><td>Months used in last 12 months</td></tr>
-      <tr><td>MOU36</td><td>Months used in last 36 months</td></tr>
-      <tr><td>ABC_LOCAL</td><td>Inventory prioritization code</td></tr>
-      <tr><td>NIS Machine Code</td><td>Internal classification</td></tr>
-    </tbody>
-  </table>
+Disposition:
+- `Disposition_Category`
+- `Confidence_Level`
 
-  <h3>GBOM</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Platform</td><td>Tool family</td></tr>
-      <tr><td>Three_CEID</td><td>CEID grouping</td></tr>
-      <tr><td>Tool_Type</td><td>Sub-type classification</td></tr>
-      <tr><td>Process_Node</td><td>Process configuration</td></tr>
-      <tr><td>Qty_Per_Tool</td><td>Units per tool</td></tr>
-    </tbody>
-  </table>
+---
 
-  <h3>Auto Tool List</h3>
-  <table>
-    <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>ENTITY</td><td>Tool identifier</td></tr>
-      <tr><td>install_sts</td><td>Installation status</td></tr>
-      <tr><td>Location</td><td>Fab location</td></tr>
-      <tr><td>Process_Node</td><td>Process configuration</td></tr>
-    </tbody>
-  </table>
+### 7.2 Output 2 — Drilldown Table
 
-  <hr />
+**Grain:** One row per:
 
-  <h2>10. Technical Data Flow</h2>
-  <pre><code>┌─────────────────────────────┐
+- `Part_Number`
+- `Platform`
+- `Three_CEID`
+- `Tool_Type`
+- `Process_Node`
+
+**Includes:**
+
+- `Qty`
+- `Total_Amount`
+- `Qty_Per_Tool`
+- `Active_Tool_Count`
+
+Including `Qty` and `Total_Amount` allows prioritization of the highest financial exposure parts.
+
+---
+
+## 8. Disposition Logic
+
+### High Confidence — Sell to Intel
+- Part exists in GBOM  
+- At least one matching active tool configuration exists  
+
+### Medium Confidence — Investigate
+- Part exists in GBOM  
+- No matching active tools found  
+
+### Low Confidence — Divest / Scrap Candidate
+- No GBOM match found  
+
+---
+
+## 9. Full Field Definitions
+
+### Inventory
+
+| Field | Meaning |
+|--------|----------|
+| Age | Time since part entered storage |
+| MOU12 | Months used in last 12 months |
+| MOU36 | Months used in last 36 months |
+| ABC_LOCAL | Inventory prioritization code |
+| NIS Machine Code | Internal classification |
+
+---
+
+### GBOM
+
+| Field | Meaning |
+|--------|----------|
+| Platform | Tool family |
+| Three_CEID | CEID grouping |
+| Tool_Type | Sub-type classification |
+| Process_Node | Process configuration |
+| Qty_Per_Tool | Units per tool |
+
+---
+
+### Auto Tool List
+
+| Field | Meaning |
+|--------|----------|
+| ENTITY | Tool identifier |
+| install_sts | Installation status |
+| Location | Fab location |
+| Process_Node | Process configuration |
+
+---
+
+## 10. Technical Data Flow
+
+```
+┌─────────────────────────────┐
 │ Current Inventory           │
 └───────────────┬─────────────┘
                 │
@@ -266,33 +315,30 @@ Process_Node</code></pre>
                 ▼
 ┌─────────────────────────────┐
 │ Executive & Drilldown Views │
-└─────────────────────────────┘</code></pre>
+└─────────────────────────────┘
+```
 
-  <hr />
+---
 
-  <h2>11. Why This Design Is Simple</h2>
-  <ul>
-    <li><p>All raw files stored in SQL</p></li>
-    <li><p>GBOM normalized once</p></li>
-    <li><p>Active tool logic centralized</p></li>
-    <li><p>Clear grain definitions</p></li>
-    <li><p>No Excel-based logic</p></li>
-    <li><p>Fully reproducible</p></li>
-    <li><p>Easy for another developer to resume</p></li>
-  </ul>
+## 11. Why This Design Is Simple
 
-  <hr />
+- All raw files stored in SQL  
+- GBOM normalized once  
+- Active tool logic centralized  
+- Clear grain definitions  
+- No Excel-based logic  
+- Fully reproducible  
+- Easy for another developer to resume  
 
-  <h2>12. What This Does Not Attempt</h2>
-  <ul>
-    <li><p>Demand forecasting</p></li>
-    <li><p>Shipping cost optimization</p></li>
-    <li><p>Time-series trend analysis</p></li>
-    <li><p>Financial modeling beyond inventory value</p></li>
-  </ul>
-  <p>This strictly answers:</p>
-  <blockquote>
-    <p><strong>Does this inventory support active Intel tools today?</strong></p>
-  </blockquote>
-</body>
-</html>
+---
+
+## 12. What This Does Not Attempt
+
+- Demand forecasting  
+- Shipping cost optimization  
+- Time-series trend analysis  
+- Financial modeling beyond inventory value  
+
+This strictly answers:
+
+> **Does this inventory support active Intel tools today?**
