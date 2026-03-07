@@ -135,44 +135,36 @@ def build_config_mart(df_mom):
     """
     print("Building mart_installed_base_by_config ...")
 
-    # Deduplicate to ONE Age_Bucket per ENTITY before any groupby.
-    # Same root cause as the leadership mart: a tool with multiple Process_Node
-    # rows can have inconsistent Warranty_Start values, causing it to appear in
-    # two age buckets and making per-bucket counts sum > total distinct count.
-    # We resolve the canonical Age_Bucket at the entity level first, then join
-    # it back so every row for that tool uses the same bucket.
     df_mom = df_mom.copy()
     df_mom["Process_Node"] = pd.to_numeric(df_mom["Process_Node"], errors="coerce").astype("Int64")
-    entity_age = (
-        df_mom[["ENTITY", "Warranty_Start"]]
-        .sort_values("Warranty_Start", na_position="last")
-        .drop_duplicates(subset=["ENTITY"], keep="first")
-    )
-    entity_age = add_age_bucket(entity_age)[["ENTITY", "Age_Bucket"]]
-    df = df_mom.merge(entity_age, on="ENTITY", how="left")
+
+    # Tool_ID = ENTITY + Location — ENTITY alone is not globally unique because
+    # the same tool ID can exist in different locations as different physical tools.
+    df_mom["Tool_ID"] = df_mom["ENTITY"].astype(str) + "|" + df_mom["Location"].astype(str)
+
+    df_mom = add_age_bucket(df_mom)
 
     # Active flag
-    df["is_active"] = is_active(df["install_sts"])
+    df_mom["is_active"] = is_active(df_mom["install_sts"])
 
     # --- Total active distinct count per config ---
-    active_df = df[df["is_active"]].copy()
-    # Join key is Three_CEID + Process_Node only — Platform is excluded because
-    # GBOM does not distinguish between platform variants (e.g. Tactras vs Tactras BX).
+    active_df = df_mom[df_mom["is_active"]].copy()
+    # Join key is Three_CEID + Process_Node only — Platform excluded intentionally.
     config_total = (
         active_df
-        .groupby(["Three_CEID", "Process_Node"])["ENTITY"]
+        .groupby(["Three_CEID", "Process_Node"])["Tool_ID"]
         .nunique()
         .reset_index()
-        .rename(columns={"ENTITY": "Active_Tool_Count_Config"})
+        .rename(columns={"Tool_ID": "Active_Tool_Count_Config"})
     )
 
     # --- Age-bucket counts (still DISTINCT per config + bucket) ---
     age_counts = (
         active_df
-        .groupby(["Three_CEID", "Process_Node", "Age_Bucket"])["ENTITY"]
+        .groupby(["Three_CEID", "Process_Node", "Age_Bucket"])["Tool_ID"]
         .nunique()
         .reset_index()
-        .rename(columns={"ENTITY": "Count"})
+        .rename(columns={"Tool_ID": "Count"})
     )
     age_pivot = age_counts.pivot_table(
         index=["Three_CEID", "Process_Node"],
@@ -312,11 +304,13 @@ def build_leadership(df_gbom, df_mom, df_inv, inv_part):
     df_gbom_keys["Process_Node"] = pd.to_numeric(
         df_gbom_keys["Process_Node"], errors="coerce"
     ).astype("Int64")
-    df_mom_keys = df_mom[["ENTITY", "Three_CEID", "Process_Node", "install_sts",
+    df_mom_keys = df_mom[["ENTITY", "Location", "Three_CEID", "Process_Node", "install_sts",
                            "Warranty_Start"]].copy()
     df_mom_keys["Process_Node"] = pd.to_numeric(
         df_mom_keys["Process_Node"], errors="coerce"
     ).astype("Int64")
+    # Tool_ID = ENTITY + Location — same composite key used throughout the pipeline
+    df_mom_keys["Tool_ID"] = df_mom_keys["ENTITY"].astype(str) + "|" + df_mom_keys["Location"].astype(str)
     df_mom_keys = add_age_bucket(df_mom_keys)
 
     # -----------------------------------------------------------------------
@@ -358,39 +352,41 @@ def build_leadership(df_gbom, df_mom, df_inv, inv_part):
     # Part_Number — this is the only way bucket sums can exceed Number_of_active_tools.
     bucket_check = (
         active_join
-        .groupby(["Part_Number", "ENTITY"])["Age_Bucket"]
+        .groupby(["Part_Number", "Tool_ID"])["Age_Bucket"]
         .nunique()
         .reset_index()
         .rename(columns={"Age_Bucket": "Distinct_Buckets"})
     )
     multi_bucket = bucket_check[bucket_check["Distinct_Buckets"] > 1]
     if len(multi_bucket) > 0:
-        print(f"  *** WARNING: {len(multi_bucket)} (Part, ENTITY) pairs span multiple age buckets ***")
+        print(f"  *** WARNING: {len(multi_bucket)} (Part, Tool_ID) pairs span multiple age buckets ***")
         print("  Sample offending tools:")
-        sample_entities = multi_bucket["ENTITY"].unique()[:5]
-        for ent in sample_entities:
-            rows = active_join[active_join["ENTITY"] == ent][["ENTITY", "Three_CEID", "Process_Node", "Warranty_Start", "Age_Bucket"]].drop_duplicates()
+        sample_ids = multi_bucket["Tool_ID"].unique()[:5]
+        for tid in sample_ids:
+            rows = active_join[active_join["Tool_ID"] == tid][["Tool_ID", "Three_CEID", "Process_Node", "Warranty_Start", "Age_Bucket"]].drop_duplicates()
             print(rows.to_string(index=False))
     else:
         print("  Bucket consistency check PASSED — no tool spans multiple buckets")
     # --- End diagnostic ---
 
-    # Step D: COUNT(DISTINCT ENTITY) per Part_Number — this is the correct method
+    # Step D: COUNT(DISTINCT Tool_ID) per Part_Number — Tool_ID = ENTITY + Location
+    # Using Tool_ID prevents same-named tools in different locations from being
+    # collapsed into one, which would undercount the true number of active tools.
     part_tool_counts = (
         active_join
-        .groupby("Part_Number")["ENTITY"]
+        .groupby("Part_Number")["Tool_ID"]
         .nunique()
         .reset_index()
-        .rename(columns={"ENTITY": "Number_of_active_tools"})
+        .rename(columns={"Tool_ID": "Number_of_active_tools"})
     )
 
-    # Step E: age-split distinct counts at part level (same logic)
+    # Step E: age-split distinct counts at part level — still using Tool_ID
     age_part = (
         active_join
-        .groupby(["Part_Number", "Age_Bucket"])["ENTITY"]
+        .groupby(["Part_Number", "Age_Bucket"])["Tool_ID"]
         .nunique()
         .reset_index()
-        .rename(columns={"ENTITY": "Count"})
+        .rename(columns={"Tool_ID": "Count"})
     )
     age_part_pivot = age_part.pivot_table(
         index="Part_Number",
