@@ -174,13 +174,13 @@ def build_config_mart(df_mom):
         fill_value=0,
     ).reset_index()
 
-    # Rename pivot columns
+    # Rename pivot columns to human-readable names
     age_col_map = {
-        "0_1Y"       : "Active_Tool_Count_0_1Y",
-        "1_3Y"       : "Active_Tool_Count_1_3Y",
-        "3_5Y"       : "Active_Tool_Count_3_5Y",
-        "5P_Y"       : "Active_Tool_Count_5P_Y",
-        "UnknownAge" : "Active_Tool_Count_UnknownAge",
+        "0_1Y"       : "Count_Of_Tools_Age_0_to_1_Yr",
+        "1_3Y"       : "Count_Of_Tools_Age_1_to_3_Yr",
+        "3_5Y"       : "Count_Of_Tools_Age_3_to_5_Yr",
+        "5P_Y"       : "Count_Of_Tools_Age_5_Plus_Yr",
+        "UnknownAge" : "Count_Of_Tools_Age_Unknown",
     }
     age_pivot = age_pivot.rename(columns=age_col_map)
     age_pivot.columns.name = None
@@ -267,20 +267,13 @@ def build_leadership(df_gbom, df_mom, df_inv, inv_part):
     # Build the agg spec dynamically so missing optional columns (MOU12, MOU36,
     # Supplier_Code) don't cause a KeyError — they'll simply be absent from the
     # output rather than crashing the script.
+    # MOU columns intentionally excluded from final output per business request.
     agg_spec = {
         "Amount_of_stock" : ("Qty",            "sum"),
         "Total_Amount_USD": ("Total_Amount_USD","sum"),
     }
     if "Supplier_Code" in df_inv.columns:
         agg_spec["Supplier_Code"] = ("Supplier_Code", "first")
-    if "MOU12" in df_inv.columns:
-        agg_spec["MOU12"] = ("MOU12", "max")
-    else:
-        print("  WARNING: MOU12 column not found in inventory — skipping.")
-    if "MOU36" in df_inv.columns:
-        agg_spec["MOU36"] = ("MOU36", "max")
-    else:
-        print("  WARNING: MOU36 column not found in inventory — skipping.")
     inv_agg = df_inv.groupby("Part_Number", as_index=False).agg(**agg_spec)
     inv_agg["Cost_per_part"] = (
         inv_agg["Total_Amount_USD"] / inv_agg["Amount_of_stock"].replace(0, np.nan)
@@ -293,6 +286,18 @@ def build_leadership(df_gbom, df_mom, df_inv, inv_part):
         .groupby("Part_Number", as_index=False)["Qty_Per_Tool"]
         .max()
         .rename(columns={"Qty_Per_Tool": "Amount_needed_per_tool"})
+    )
+
+    # --- Applicable Three_CEID and Tool_Type lists per part ---
+    # For each part, collect all unique Three_CEID and Tool_Type values from GBOM
+    # and join them into a comma-separated string so each part has one summary row.
+    gbom_lists = (
+        df_gbom
+        .groupby("Part_Number", as_index=False)
+        .agg(
+            Applicable_CEIDs      =("Three_CEID", lambda x: ", ".join(sorted(x.dropna().astype(str).unique()))),
+            Applicable_Tool_Types =("Tool_Type",  lambda x: ", ".join(sorted(x.dropna().astype(str).unique()))),
+        )
     )
 
     # --- True part-level DISTINCT active tool count ---
@@ -396,11 +401,11 @@ def build_leadership(df_gbom, df_mom, df_inv, inv_part):
         fill_value=0,
     ).reset_index()
     age_col_map = {
-        "0_1Y"       : "Active_Tools_0_1Y",
-        "1_3Y"       : "Active_Tools_1_3Y",
-        "3_5Y"       : "Active_Tools_3_5Y",
-        "5P_Y"       : "Active_Tools_5P_Y",
-        "UnknownAge" : "Active_Tools_UnknownAge",
+        "0_1Y"       : "Count_Of_Tools_Age_0_to_1_Yr",
+        "1_3Y"       : "Count_Of_Tools_Age_1_to_3_Yr",
+        "3_5Y"       : "Count_Of_Tools_Age_3_to_5_Yr",
+        "5P_Y"       : "Count_Of_Tools_Age_5_Plus_Yr",
+        "UnknownAge" : "Count_Of_Tools_Age_Unknown",
     }
     age_part_pivot = age_part_pivot.rename(columns=age_col_map)
     age_part_pivot.columns.name = None
@@ -408,6 +413,7 @@ def build_leadership(df_gbom, df_mom, df_inv, inv_part):
     # --- Assemble leadership table ---
     # Start from all inventory parts
     leadership = inv_agg.merge(gbom_max_qty,      on="Part_Number", how="left")
+    leadership = leadership.merge(gbom_lists,       on="Part_Number", how="left")
     leadership = leadership.merge(part_tool_counts, on="Part_Number", how="left")
     leadership = leadership.merge(age_part_pivot,   on="Part_Number", how="left")
 
